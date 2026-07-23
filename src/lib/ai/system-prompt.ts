@@ -64,7 +64,7 @@ export function buildSystemPrompt(ctx: UserContext): string {
     if (safeName) lines.push(`- Name: ${safeName}`);
   }
 
-  lines.push(ctx.walletAddress ? `- Wallet: connected` : `- Wallet: not connected`);
+  lines.push(ctx.walletAddress ? `- Wallet address: ${ctx.walletAddress}` : `- Wallet: not connected`);
 
   if (ctx.billCount !== undefined)
     lines.push(`- Active bills: ${ctx.billCount}`);
