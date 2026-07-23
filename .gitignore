@@ -1,0 +1,27 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+
+# Next.js
+.next/
+out/
+
+# Serwist / PWA
+public/sw*
+public/swe-worker*
+
+# Vercel
+.vercel
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+.env*.local
+
+# Claude
+CLAUDE.md
+.claude/

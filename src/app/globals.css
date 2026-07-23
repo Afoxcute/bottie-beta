@@ -1,0 +1,139 @@
+@import "tailwindcss";
+
+/* ─── Design Tokens ─── */
+
+@theme {
+  --color-cream: #141513;
+  --color-cream-dark: #1B1C19;
+  --color-ink: #F2F0E8;
+  --color-ink-light: #A7A79A;
+  --color-sage: #8FAE82;
+  --color-sage-light: #AFC69F;
+  --color-fail: #D07B6D;
+  --color-border: #2A2B27;
+
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
+  --radius-xl: 1.5rem;
+}
+
+@theme inline {
+  --font-display: var(--font-instrument-serif), Georgia, serif;
+  --font-body: var(--font-source-serif-4), Georgia, serif;
+  --font-mono: var(--font-jetbrains-mono), "Fira Code", monospace;
+}
+
+/* ─── Base ─── */
+
+body {
+  background-color: var(--color-cream);
+  color: var(--color-ink);
+  font-family: var(--font-body);
+  min-height: 100dvh;
+  overscroll-behavior: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── Selection ─── */
+
+::selection {
+  background-color: var(--color-sage);
+  color: var(--color-cream);
+}
+
+/* ─── Noise Grain Overlay ─── */
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  background-image: url("/noise.svg");
+  background-size: 200px 200px;
+  opacity: 0.06;
+  mix-blend-mode: soft-light;
+}
+
+/* ─── Scrollbar (hidden globally) ─── */
+
+::-webkit-scrollbar {
+  display: none;
+}
+
+* {
+  scrollbar-width: none;
+}
+
+/* ─── Utilities ─── */
+
+@utility label-mono {
+  font-family: var(--font-body);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  color: var(--color-ink-light);
+}
+
+/* ─── Range Slider ─── */
+
+.slider-sage {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--color-border);
+  outline: none;
+}
+
+.slider-sage::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--color-sage);
+  cursor: pointer;
+  border: 2px solid var(--color-cream);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+}
+
+.slider-sage::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--color-sage);
+  cursor: pointer;
+  border: 2px solid var(--color-cream);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+}
+
+.slider-sage:disabled {
+  opacity: 0.4;
+}
+
+/* ─── Sun shimmer — glows briefly then idles, like wave-loop ─── */
+
+@keyframes sun-loop {
+  0%   { transform: rotate(0deg) scale(1); }
+  5%   { transform: rotate(20deg) scale(1.06); }
+  10%  { transform: rotate(-12deg) scale(1.04); }
+  16%  { transform: rotate(15deg) scale(1.05); }
+  22%  { transform: rotate(0deg) scale(1); }
+  100% { transform: rotate(0deg) scale(1); }
+}
+
+/* ─── Looping wave — waves ~2s then idles ~6s, repeats forever ─── */
+
+@keyframes wave-loop {
+  0%   { transform: rotate(0deg); }
+  4%   { transform: rotate(14deg); }
+  8%   { transform: rotate(-8deg); }
+  12%  { transform: rotate(14deg); }
+  16%  { transform: rotate(-4deg); }
+  20%  { transform: rotate(10deg); }
+  24%  { transform: rotate(0deg); }
+  100% { transform: rotate(0deg); }
+}

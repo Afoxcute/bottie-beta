@@ -1,0 +1,54 @@
+{
+  "name": "bottie",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@ai-sdk/deepseek": "^2.0.24",
+    "@ai-sdk/openai": "2.0.110",
+    "@ai-sdk/react": "^3.0.118",
+    "@circle-fin/adapter-viem-v2": "^1.12.1",
+    "@circle-fin/app-kit": "^1.8.1",
+    "@circle-fin/x402-batching": "^3.2.0",
+    "@neondatabase/serverless": "^1.0.2",
+    "@privy-io/react-auth": "^3.17.0",
+    "@privy-io/server-auth": "^1.32.5",
+    "@privy-io/wagmi": "^4.0.2",
+    "@serwist/next": "^9.5.6",
+    "@tanstack/react-query": "^5.90.0",
+    "@vercel/postgres": "^0.10.0",
+    "@x402/core": "^2.17.0",
+    "@x402/evm": "^2.17.0",
+    "@yo-protocol/react": "^1.0.6",
+    "@zerodev/ecdsa-validator": "^5.4.9",
+    "@zerodev/sdk": "^5.5.7",
+    "ai": "^6.0.116",
+    "drizzle-orm": "^0.45.1",
+    "framer-motion": "^12.35.0",
+    "next": "^16.1.6",
+    "permissionless": "^0.3.4",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "viem": "^2.47.1",
+    "wagmi": "~2.19.5",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.2.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "drizzle-kit": "^0.31.9",
+    "serwist": "^9.5.6",
+    "tailwindcss": "^4.2.0",
+    "typescript": "^5.7.0"
+  },
+  "overrides": {
+    "wagmi": "~2.19.5"
+  },
+  "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
+}
