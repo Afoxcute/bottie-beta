@@ -25,6 +25,7 @@ export async function POST(req: Request) {
     messages,
     walletAddress,
     userName,
+    walletBalance,
     totalBillsDueUsd,
     portfolioValueUsd,
     billCount,
@@ -32,6 +33,7 @@ export async function POST(req: Request) {
     messages: UIMessage[];
     walletAddress?: string;
     userName?: string;
+    walletBalance?: number;
     totalBillsDueUsd?: number;
     portfolioValueUsd?: number;
     billCount?: number;
@@ -50,6 +52,7 @@ export async function POST(req: Request) {
     system: buildSystemPrompt({
       userName,
       walletAddress,
+      walletBalance,
       totalBillsDueUsd,
       portfolioValueUsd,
       billCount,

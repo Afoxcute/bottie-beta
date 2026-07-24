@@ -6,6 +6,7 @@ import { DefaultChatTransport } from "ai";
 import { usePrivy } from "@privy-io/react-auth";
 import { useChatSheet } from "@/contexts/chat-context";
 import { getUserFirstName, getTimeBasedGreeting } from "@/lib/user-display-name";
+import { useUsdcBalance } from "@/hooks/use-usdc-balance";
 import { MessageBubble } from "./message-bubble";
 import { ThinkingIndicator } from "./thinking-indicator";
 import { ToolApprovalCard } from "./tool-approval-card";
@@ -33,16 +34,18 @@ export function ChatSheet({ visible }: ChatSheetProps) {
   const greeting = getTimeBasedGreeting();
 
   const walletAddress = user?.smartWallet?.address ?? user?.wallet?.address;
+  const { balance: walletBalance } = useUsdcBalance(walletAddress as `0x${string}` | undefined);
 
   const bodyRef = useRef<Record<string, unknown>>({});
   bodyRef.current = {
     walletAddress,
     userName: name,
+    walletBalance,
   };
 
   const transport = useMemo(() => {
     const liveBody: Record<string, unknown> = {};
-    for (const key of ["walletAddress", "userName"]) {
+    for (const key of ["walletAddress", "userName", "walletBalance"]) {
       Object.defineProperty(liveBody, key, {
         get: () => bodyRef.current[key],
         enumerable: true,

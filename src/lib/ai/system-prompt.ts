@@ -1,6 +1,7 @@
 interface UserContext {
   userName?: string;
   walletAddress?: string;
+  walletBalance?: number;
   totalBillsDueUsd?: number;
   portfolioValueUsd?: number;
   billCount?: number;
@@ -66,6 +67,8 @@ export function buildSystemPrompt(ctx: UserContext): string {
   }
 
   lines.push(ctx.walletAddress ? `- Wallet address: ${ctx.walletAddress}` : `- Wallet: not connected`);
+  if (ctx.walletBalance !== undefined)
+    lines.push(`- Wallet balance: $${ctx.walletBalance.toFixed(2)} USDC`);
 
   if (ctx.billCount !== undefined)
     lines.push(`- Active bills: ${ctx.billCount}`);
