@@ -1,5 +1,5 @@
-import { openai } from "@ai-sdk/openai";
 import { convertToModelMessages, streamText, stepCountIs, type UIMessage } from "ai";
+import { getLanguageModel } from "@/lib/ai/model-provider";
 import { createTools } from "@/lib/ai/tools";
 import { buildSystemPrompt } from "@/lib/ai/system-prompt";
 import { windowMessages, extractConversationRecap } from "@/lib/ai/window-messages";
@@ -46,7 +46,7 @@ export async function POST(req: Request) {
   const windowed = windowMessages(messages);
 
   const result = streamText({
-    model: openai("gpt-4o-mini"),
+    model: getLanguageModel(),
     system: buildSystemPrompt({
       userName,
       walletAddress,
