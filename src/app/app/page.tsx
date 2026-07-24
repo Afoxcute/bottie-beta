@@ -7,16 +7,18 @@ import { useDemoState } from "@/contexts/demo-state-context";
 import { BillsScreen } from "@/components/dashboard/bills-screen";
 import { InvestmentsScreen } from "@/components/dashboard/investments-screen";
 import { PaymentsScreen } from "@/components/dashboard/payments-screen";
+import { BankingScreen } from "@/components/dashboard/banking-screen";
 import { FundWalletSheet } from "@/components/dashboard/fund-wallet-sheet";
 import { useUsdcBalance, LOW_BALANCE_THRESHOLD_USD } from "@/hooks/use-usdc-balance";
 import { DEMO_BILLS, ASSET_PRICES } from "@/lib/demo-data";
 import { getUserFirstName, getTimeBasedGreeting } from "@/lib/user-display-name";
 
-type Tab = "bills" | "investments" | "payments" | "chat";
+type Tab = "bills" | "investments" | "payments" | "banking" | "chat";
 
 const TABS: { key: Tab; label: string; icon: string }[] = [
   { key: "bills",       label: "Bills",   icon: "🧾" },
   { key: "investments", label: "Invest",  icon: "📈" },
+  { key: "banking",     label: "Banking", icon: "🏦" },
   { key: "payments",    label: "History", icon: "💳" },
   { key: "chat",        label: "Chat",    icon: "💬" },
 ];
@@ -189,6 +191,7 @@ function DashboardInner() {
       <div className="px-5 py-4">
         {activeTab === "bills"       && <BillsScreen />}
         {activeTab === "investments" && <InvestmentsScreen />}
+        {activeTab === "banking"     && <BankingScreen />}
         {activeTab === "payments"    && <PaymentsScreen />}
       </div>
 
