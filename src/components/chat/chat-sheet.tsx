@@ -34,11 +34,15 @@ export function ChatSheet({ visible }: ChatSheetProps) {
   const greeting = getTimeBasedGreeting();
 
   const walletAddress = user?.smartWallet?.address ?? user?.wallet?.address;
+  const solanaAddress = ((user?.linkedAccounts as any[]) ?? []).find(
+    (a) => a.type === "wallet" && a.chainType === "solana" && a.walletClientType === "privy"
+  )?.address as string | undefined;
   const { balance: walletBalance } = useUsdcBalance(walletAddress as `0x${string}` | undefined);
 
   const bodyRef = useRef<Record<string, unknown>>({});
   bodyRef.current = {
     walletAddress,
+    solanaAddress,
     userName: name,
     walletBalance,
   };
@@ -48,7 +52,7 @@ export function ChatSheet({ visible }: ChatSheetProps) {
 
   const transport = useMemo(() => {
     const liveBody: Record<string, unknown> = {};
-    for (const key of ["walletAddress", "userName", "walletBalance"]) {
+    for (const key of ["walletAddress", "solanaAddress", "userName", "walletBalance"]) {
       Object.defineProperty(liveBody, key, {
         get: () => bodyRef.current[key],
         enumerable: true,

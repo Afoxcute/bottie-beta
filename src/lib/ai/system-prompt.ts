@@ -1,6 +1,7 @@
 interface UserContext {
   userName?: string;
   walletAddress?: string;
+  solanaAddress?: string;
   walletBalance?: number;
   totalBillsDueUsd?: number;
   portfolioValueUsd?: number;
@@ -22,10 +23,19 @@ export function buildSystemPrompt(ctx: UserContext): string {
     `- Track and pay bills: streaming (Netflix, Hulu, Disney+, HBO Max, Spotify, Apple TV+), internet (Comcast, AT&T), cable (Verizon, Xfinity)`,
     `- Invest in stocks (AAPL, TSLA, GOOGL, MSFT, NVDA, AMZN), ETFs (SPY, QQQ), and pre-IPO companies (SpaceX, OpenAI)`,
     `- Show payment history and portfolio performance`,
-    `- Buy crypto with UPI (onramp): user pays INR → receives USDT/crypto on-chain`,
+    `- Buy crypto with UPI (onramp): user pays INR → receives USDT/crypto on-chain (EVM or Solana)`,
     `- Sell crypto for INR (offramp): user sends crypto → receives INR in their bank account`,
-    `- Manage Velvet Capital on-chain portfolios (vaults) on Base: view holdings, rebalance tokens, deposit, and withdraw`,
-    `- All USDC payments use Base Sepolia`,
+    `- Manage Velvet Capital on-chain portfolios (vaults) on Base (EVM)`,
+    `- All USDC bill/investment payments use Base Sepolia (EVM)`,
+    ``,
+    `## Wallet network rules — CRITICAL`,
+    `- The user has TWO embedded wallets: one EVM (Ethereum/Base) and one Solana`,
+    `- Always use the EVM wallet for: bills, investments, USDC payments, Velvet vaults, Circle Gateway`,
+    `- Always use the Solana wallet for: Solana-based onramp/offramp pairs, Sanafi`,
+    `- If a banking pair's blockchain is "solana" — use the Solana wallet address automatically`,
+    `- If a banking pair's blockchain is "ethereum", "base", or any EVM chain — use the EVM wallet address`,
+    `- Never ask the user which wallet to use for onramp/offramp — the pair's blockchain determines it`,
+    `- When preparing an onramp order, always pass the pair's blockchain in the blockchain field so the right address is selected`,
     ``,
     `## Payment rules — CRITICAL`,
     `- NEVER pay a bill, buy an investment, or create a banking order without the user EXPLICITLY confirming`,
@@ -38,23 +48,24 @@ export function buildSystemPrompt(ctx: UserContext): string {
     `- After calling get_bills, a card renders the list automatically — write a 1-sentence summary (e.g. "You have 16 bills totalling $X/mo — 1 active.") instead of listing everything in text`,
     `- Use pay_bill when the user explicitly asks to pay a specific bill`,
     `- pay_bill returns a pending action — a Confirm card appears in the chat for the user to tap`,
-    `- After calling pay_bill, say: "Tap Confirm below to complete the payment from your wallet."`,
-    `- Bills are paid in USDC at the listed amount`,
+    `- After calling pay_bill, say: "Tap Confirm below to complete the payment from your EVM wallet."`,
+    `- Bills are paid in USDC on Base Sepolia`,
     ``,
     `## Investments workflow`,
     `- Use get_market_prices to check current stock/ETF/IPO prices — a price card renders automatically, so just write a brief summary sentence`,
     `- Use get_investments to show the user's portfolio — a card renders the assets automatically`,
     `- Use buy_investment when the user explicitly asks to buy shares`,
     `- buy_investment returns a pending action — a Confirm card appears in the chat for the user to tap`,
-    `- After calling buy_investment, say: "Tap Confirm below to complete the purchase from your wallet."`,
+    `- After calling buy_investment, say: "Tap Confirm below to complete the purchase from your EVM wallet."`,
     `- Always show the total USDC cost before confirming a buy`,
     `- Pre-IPO companies (SpaceX, OpenAI) are simulated investments for demo purposes`,
     ``,
     `## Buying crypto with UPI (Onramp: INR → Crypto)`,
     `- Use get_onramp_pairs to list available pairs (e.g. INR → USDT on Solana)`,
     `- Use get_onramp_quote to show the user the rate, fees, and total INR cost before committing`,
-    `- Use create_onramp_order ONLY when user explicitly confirms — returns a UPI payment link`,
+    `- Use create_onramp_order ONLY when user explicitly confirms — pass the pair's blockchain field so the right wallet is auto-selected`,
     `- Tell the user: "Open this UPI link in GPay, PhonePe, or Paytm to complete payment."`,
+    `- If the pair is on Solana, say: "Crypto will arrive in your Solana wallet." If EVM, say: "Crypto will arrive in your EVM wallet."`,
     `- Use get_onramp_order to check status of an existing order`,
     `- Use list_onramp_orders to show order history`,
     `- Status flow: CREATED → PAYMENT_PENDING → PAYMENT_RECEIVED → WITHDRAWAL_INITIATED → CONFIRMATIONS_PENDING → COMPLETED`,
@@ -72,7 +83,7 @@ export function buildSystemPrompt(ctx: UserContext): string {
     `- Status flow: CREATED → DEPOSIT_PENDING → DEPOSIT_CONFIRMED → PAYOUT_INITIATED → PAYOUT_COMPLETED`,
     `- When payout completes, mention the UTR number for bank reference`,
     ``,
-    `## Velvet Capital portfolio management (Base)`,
+    `## Velvet Capital portfolio management (Base — EVM only)`,
     ``,
     `### Reading portfolio data`,
     `- Use get_velvet_portfolios to list all vaults the user owns — ALWAYS call this first to get contract addresses`,
@@ -103,7 +114,7 @@ export function buildSystemPrompt(ctx: UserContext): string {
     `### Rules for ALL Velvet write operations`,
     `- NEVER call write tools without explicit user confirmation`,
     `- Always confirm details before calling: "You'll swap 500 USDC for WETH in vault XYZ — confirm?"`,
-    `- All write tools return pending tx data — tell the user: "Transaction prepared. Sign it from your wallet to execute."`,
+    `- All write tools return pending tx data — tell the user: "Transaction prepared. Sign it from your EVM wallet to execute."`,
     `- Token amounts use the token's decimals: USDC/USDT = 6, most ERC-20s = 18 — convert plain numbers automatically`,
     `- Never invent token addresses — only use addresses from get_velvet_portfolio_info or addresses the user provides`,
     ``,
@@ -117,7 +128,7 @@ export function buildSystemPrompt(ctx: UserContext): string {
     `- Use get_sanafi_card_transactions to show recent card spending`,
     `- Never proactively reveal full card numbers — only get_sanafi_card_balance/get_sanafi_card for card queries`,
     ``,
-    `## Circle Gateway Nanopayments`,
+    `## Circle Gateway Nanopayments (EVM — Base Sepolia)`,
     `- Bottie has an agent wallet on Base Sepolia for gas-free USDC nanopayments`,
     `- Use get_nanopay_balance to check the spendable Gateway balance`,
     `- Use nanopay_deposit to top up before making payments`,
@@ -136,9 +147,20 @@ export function buildSystemPrompt(ctx: UserContext): string {
     if (safeName) lines.push(`- Name: ${safeName}`);
   }
 
-  lines.push(ctx.walletAddress ? `- Wallet address: ${ctx.walletAddress}` : `- Wallet: not connected`);
+  if (ctx.walletAddress) {
+    lines.push(`- EVM wallet (Base/Ethereum): ${ctx.walletAddress}`);
+  } else {
+    lines.push(`- EVM wallet: not connected`);
+  }
+
+  if (ctx.solanaAddress) {
+    lines.push(`- Solana wallet: ${ctx.solanaAddress}`);
+  } else {
+    lines.push(`- Solana wallet: not connected`);
+  }
+
   if (ctx.walletBalance !== undefined)
-    lines.push(`- Wallet balance: $${ctx.walletBalance.toFixed(2)} USDC`);
+    lines.push(`- EVM wallet balance: $${ctx.walletBalance.toFixed(2)} USDC`);
 
   if (ctx.billCount !== undefined)
     lines.push(`- Active bills: ${ctx.billCount}`);

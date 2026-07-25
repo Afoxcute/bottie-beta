@@ -11,7 +11,13 @@ function getBankingProvider() {
   try { return getProvider("credible") as any; } catch { return null; }
 }
 
-export function createTools(walletAddress?: string, userId?: string) {
+export function createTools(walletAddress?: string, userId?: string, solanaAddress?: string) {
+  // Pick the right address for a given blockchain context
+  function addressFor(blockchain?: string): string {
+    const chain = (blockchain ?? "").toLowerCase();
+    if (chain === "solana" && solanaAddress) return solanaAddress;
+    return walletAddress ?? "";
+  }
   return {
     // ── Bills ─────────────────────────────────────────────────────────────────
 
@@ -405,14 +411,17 @@ export function createTools(walletAddress?: string, userId?: string) {
         amount: z.number().positive().describe("Crypto amount to receive (in output currency units)"),
         first_name: z.string().describe("Customer first name"),
         last_name: z.string().describe("Customer last name"),
-        destination_address: z.string().describe("Blockchain wallet address to receive the crypto"),
+        blockchain: z.string().describe("Blockchain for this pair (e.g. 'solana', 'ethereum') — used to auto-select the right wallet"),
+        destination_address: z.string().optional().describe("Override wallet address — leave blank to auto-use the user's wallet for the given blockchain"),
       }),
-      execute: async ({ pair_id, amount, first_name, last_name, destination_address }) => {
+      execute: async ({ pair_id, amount, first_name, last_name, blockchain, destination_address }) => {
         if (!userId) return { error: "Not authenticated" };
         const provider = getBankingProvider();
         if (!provider) return { error: "Banking not configured" };
+        const dest = destination_address?.trim() || addressFor(blockchain);
+        if (!dest) return { error: "No wallet address available for this network. Ask the user to provide one." };
         try {
-          const result = await provider.createOnrampOrder({ pair_id, amount, customer_id: userId, first_name, last_name, destination_address });
+          const result = await provider.createOnrampOrder({ pair_id, amount, customer_id: userId, first_name, last_name, destination_address: dest });
           const o = result.data;
           return {
             order_id: o.order_id,

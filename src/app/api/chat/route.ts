@@ -24,6 +24,7 @@ export async function POST(req: Request) {
   const {
     messages,
     walletAddress,
+    solanaAddress,
     userName,
     walletBalance,
     totalBillsDueUsd,
@@ -32,6 +33,7 @@ export async function POST(req: Request) {
   } = body as {
     messages: UIMessage[];
     walletAddress?: string;
+    solanaAddress?: string;
     userName?: string;
     walletBalance?: number;
     totalBillsDueUsd?: number;
@@ -43,7 +45,7 @@ export async function POST(req: Request) {
     return new Response("messages must be an array", { status: 400 });
   }
 
-  const tools = createTools(walletAddress, userId);
+  const tools = createTools(walletAddress, userId, solanaAddress);
   const recap = extractConversationRecap(messages);
   const windowed = windowMessages(messages);
 
@@ -52,6 +54,7 @@ export async function POST(req: Request) {
     system: buildSystemPrompt({
       userName,
       walletAddress,
+      solanaAddress,
       walletBalance,
       totalBillsDueUsd,
       portfolioValueUsd,
