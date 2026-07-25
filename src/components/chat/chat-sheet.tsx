@@ -26,7 +26,7 @@ export function ChatSheet({ visible }: ChatSheetProps) {
     setIsStreaming: setCtxStreaming,
     setChatInput,
   } = useChatSheet();
-  const { user } = usePrivy();
+  const { user, getAccessToken } = usePrivy();
   const scrollRef = useRef<HTMLDivElement>(null);
   const userScrolledRef = useRef(false);
 
@@ -43,6 +43,9 @@ export function ChatSheet({ visible }: ChatSheetProps) {
     walletBalance,
   };
 
+  const getAccessTokenRef = useRef(getAccessToken);
+  getAccessTokenRef.current = getAccessToken;
+
   const transport = useMemo(() => {
     const liveBody: Record<string, unknown> = {};
     for (const key of ["walletAddress", "userName", "walletBalance"]) {
@@ -51,7 +54,14 @@ export function ChatSheet({ visible }: ChatSheetProps) {
         enumerable: true,
       });
     }
-    return new DefaultChatTransport({ api: "/api/chat", body: liveBody });
+    return new DefaultChatTransport({
+      api: "/api/chat",
+      body: liveBody,
+      headers: async () => {
+        const token = await getAccessTokenRef.current();
+        return token ? { Authorization: `Bearer ${token}` } : {};
+      },
+    });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const { messages, sendMessage, addToolResult, status } = useChat({

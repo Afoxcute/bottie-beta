@@ -1,5 +1,5 @@
 import { PrivyClient } from "@privy-io/server-auth";
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 
 const privy = new PrivyClient(
   process.env.NEXT_PUBLIC_PRIVY_APP_ID!,
@@ -7,10 +7,23 @@ const privy = new PrivyClient(
 );
 
 export async function verifyAuth(): Promise<{ userId: string }> {
-  const cookieStore = await cookies();
-  const token =
-    cookieStore.get("privy-token")?.value ||
-    cookieStore.get("privy-id-token")?.value;
+  // 1. Try Authorization: Bearer header first (explicit token from client)
+  let token: string | undefined;
+  try {
+    const headerStore = await headers();
+    const auth = headerStore.get("authorization") ?? headerStore.get("Authorization");
+    if (auth?.startsWith("Bearer ")) token = auth.slice(7);
+  } catch {
+    // headers() may not be available in all contexts
+  }
+
+  // 2. Fall back to Privy session cookies
+  if (!token) {
+    const cookieStore = await cookies();
+    token =
+      cookieStore.get("privy-token")?.value ||
+      cookieStore.get("privy-id-token")?.value;
+  }
 
   if (!token) throw new Error("Unauthorized");
 
