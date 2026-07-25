@@ -664,7 +664,7 @@ export function createTools(walletAddress?: string, userId?: string) {
 
     get_velvet_portfolios: tool({
       description:
-        "List all Velvet Capital on-chain portfolios (vaults) owned by the user's wallet on Base. Returns portfolio names, IDs, rebalancing contract addresses, and vault addresses.",
+        "List all Velvet Capital on-chain portfolios (vaults) owned by the user's wallet on Base. Returns portfolio names, IDs, and all contract addresses needed for further operations.",
       inputSchema: z.object({
         chain: z.enum(["base"]).optional().describe("Chain to query (default: base)"),
       }),
@@ -681,6 +681,8 @@ export function createTools(walletAddress?: string, userId?: string) {
               portfolio_address: p.portfolio,
               vault_address: p.vaultAddress,
               rebalancing_address: p.rebalancing,
+              asset_management_config: p.assetManagementConfig,
+              token_exclusion_manager: p.tokenExclusionManager,
               is_public: p.public,
               chain: p.chainName,
               created_at: p.createdAt,
@@ -693,42 +695,39 @@ export function createTools(walletAddress?: string, userId?: string) {
       },
     }),
 
-    get_velvet_portfolio_balance: tool({
+    get_velvet_portfolio_info: tool({
       description:
-        "Check how many portfolio tokens the user holds in a specific Velvet portfolio. Also useful to confirm the user has a position before withdrawing.",
+        "Get full details of a Velvet portfolio: the user's token balance, ownership percentage, total supply, and each underlying token with its symbol and vault balance. Use this for a comprehensive portfolio view.",
       inputSchema: z.object({
-        portfolio_address: z.string().describe("The portfolio contract address from get_velvet_portfolios"),
+        portfolio_id: z.string().describe("Portfolio ID from get_velvet_portfolios"),
       }),
-      execute: async ({ portfolio_address }) => {
+      execute: async ({ portfolio_id }) => {
         if (!walletAddress) return { error: "Wallet not connected" };
         try {
-          const { getPortfolioTokenBalance, getPortfolioTokens } = await import("@/lib/velvet");
-          const [balance, tokens] = await Promise.all([
-            getPortfolioTokenBalance(portfolio_address, walletAddress),
-            getPortfolioTokens(portfolio_address),
-          ]);
-          return {
-            portfolio_address,
-            user_address: walletAddress,
-            portfolio_token_balance: balance,
-            underlying_tokens: tokens,
-          };
+          const { getPortfoliosByOwner, getPortfolioInfo } = await import("@/lib/velvet");
+          const portfolios = await getPortfoliosByOwner(walletAddress);
+          const portfolio = portfolios.find(
+            (p) => p.portfolioId === portfolio_id || p.portfolio.toLowerCase() === portfolio_id.toLowerCase()
+          );
+          if (!portfolio) return { error: "Portfolio not found" };
+          const info = await getPortfolioInfo(portfolio, walletAddress);
+          return info;
         } catch (err: any) {
-          return { error: err?.message ?? "Failed to fetch portfolio balance" };
+          return { error: err?.message ?? "Failed to fetch portfolio info" };
         }
       },
     }),
 
     rebalance_velvet_portfolio: tool({
       description:
-        "Prepare a rebalance transaction for a Velvet portfolio — swap one token for another within the vault. Returns a pending on-chain transaction the user must confirm. Only call when the user explicitly asks to rebalance.",
+        "Prepare a rebalance transaction for a Velvet portfolio — swaps one token for another within the vault, changing the token composition. Returns encoded tx data the user must sign. Only call when the user explicitly confirms.",
       inputSchema: z.object({
-        rebalancing_address: z.string().describe("The rebalancing contract address from get_velvet_portfolios"),
-        sell_token: z.string().describe("Token address to sell"),
-        buy_token: z.string().describe("Token address to buy"),
-        sell_amount: z.string().describe("Amount to sell in the token's smallest unit (e.g. '1000000' for 1 USDC with 6 decimals)"),
-        remaining_tokens: z.array(z.string()).describe("Token addresses that will remain in the vault after the trade"),
-        slippage_bps: z.string().optional().describe("Slippage tolerance in basis points, default '100' (1%)"),
+        rebalancing_address: z.string().describe("Rebalancing contract address from get_velvet_portfolios"),
+        sell_token: z.string().describe("Token address to sell out of the vault"),
+        buy_token: z.string().describe("Token address to buy into the vault"),
+        sell_amount: z.string().describe("Amount to sell in token's smallest unit (e.g. '1000000' for 1 USDC with 6 decimals)"),
+        remaining_tokens: z.array(z.string()).describe("Addresses of tokens that will remain in the vault after this trade"),
+        slippage_bps: z.string().optional().describe("Slippage tolerance in basis points — default '100' (1%)"),
       }),
       execute: async ({ rebalancing_address, sell_token, buy_token, sell_amount, remaining_tokens, slippage_bps }) => {
         if (!walletAddress) return { error: "Wallet not connected" };
@@ -760,13 +759,54 @@ export function createTools(walletAddress?: string, userId?: string) {
       },
     }),
 
+    update_velvet_weights: tool({
+      description:
+        "Prepare a weight-update transaction for a Velvet portfolio — adjusts token allocations without adding or removing tokens (sells some of one token to buy more of another already in the vault). Returns encoded tx data. Only call when user explicitly confirms.",
+      inputSchema: z.object({
+        rebalancing_address: z.string().describe("Rebalancing contract address from get_velvet_portfolios"),
+        sell_token: z.string().describe("Token address to reduce (sell)"),
+        buy_token: z.string().describe("Token address to increase (buy)"),
+        sell_amount: z.string().describe("Amount to sell in token's smallest unit"),
+        remaining_tokens: z.array(z.string()).describe("All current vault token addresses (no change to token list)"),
+        slippage_bps: z.string().optional().describe("Slippage tolerance in basis points — default '100' (1%)"),
+      }),
+      execute: async ({ rebalancing_address, sell_token, buy_token, sell_amount, remaining_tokens, slippage_bps }) => {
+        if (!walletAddress) return { error: "Wallet not connected" };
+        try {
+          const { getRebalanceTxData } = await import("@/lib/velvet");
+          // updateWeights keeps all existing tokens — newTokens = all current tokens (no additions)
+          const txData = await getRebalanceTxData({
+            rebalanceAddress: rebalancing_address,
+            sellToken: sell_token,
+            buyToken: buy_token,
+            sellAmount: sell_amount,
+            slippage: slippage_bps ?? "100",
+            remainingTokens: remaining_tokens,
+            owner: walletAddress,
+          });
+          return {
+            pendingWeightUpdate: true,
+            rebalancing_address,
+            sell_tokens: txData.sellTokens,
+            sell_amounts: txData.sellAmounts,
+            handler: txData.handler,
+            call_data: txData.callData,
+            estimate_gas: txData.estimateGas,
+            gas_price: txData.gasPrice,
+          };
+        } catch (err: any) {
+          return { error: err?.message ?? "Failed to prepare weight update" };
+        }
+      },
+    }),
+
     deposit_velvet_portfolio: tool({
       description:
-        "Prepare a deposit transaction to add tokens into a Velvet portfolio vault. Returns transaction data the user must sign and broadcast. Only call when the user explicitly confirms they want to deposit.",
+        "Prepare a deposit transaction to add ERC-20 tokens into a Velvet portfolio vault. Returns transaction data the user must sign. Only call when the user explicitly confirms.",
       inputSchema: z.object({
         portfolio_address: z.string().describe("Portfolio contract address from get_velvet_portfolios"),
         deposit_token: z.string().describe("ERC-20 token address to deposit"),
-        deposit_amount: z.string().describe("Amount to deposit in token's smallest unit (e.g. '1000000' for 1 USDC with 6 decimals)"),
+        deposit_amount: z.string().describe("Amount in token's smallest unit (e.g. '1000000' for 1 USDC with 6 decimals)"),
       }),
       execute: async ({ portfolio_address, deposit_token, deposit_amount }) => {
         if (!walletAddress) return { error: "Wallet not connected" };
@@ -783,12 +823,7 @@ export function createTools(walletAddress?: string, userId?: string) {
             portfolio_address,
             deposit_token,
             deposit_amount,
-            tx: {
-              to: txData.to,
-              data: txData.data,
-              gas_limit: txData.gasLimit,
-              gas_price: txData.gasPrice,
-            },
+            tx: { to: txData.to, data: txData.data, gas_limit: txData.gasLimit, gas_price: txData.gasPrice },
           };
         } catch (err: any) {
           return { error: err?.message ?? "Failed to prepare deposit" };
@@ -798,11 +833,11 @@ export function createTools(walletAddress?: string, userId?: string) {
 
     withdraw_velvet_portfolio: tool({
       description:
-        "Prepare a withdrawal transaction to remove tokens from a Velvet portfolio vault and receive an ERC-20 token. Returns transaction data the user must sign and broadcast. Only call when the user explicitly confirms they want to withdraw.",
+        "Prepare a withdrawal transaction to burn portfolio tokens and receive an ERC-20 token from the Velvet vault. Returns transaction data the user must sign. Only call when the user explicitly confirms.",
       inputSchema: z.object({
         portfolio_address: z.string().describe("Portfolio contract address from get_velvet_portfolios"),
         withdraw_token: z.string().describe("ERC-20 token address to receive after withdrawal"),
-        withdraw_amount: z.string().describe("Portfolio token amount to burn (in smallest unit, 18 decimals)"),
+        withdraw_amount: z.string().describe("Portfolio token amount to burn in smallest unit (18 decimals)"),
       }),
       execute: async ({ portfolio_address, withdraw_token, withdraw_amount }) => {
         if (!walletAddress) return { error: "Wallet not connected" };
@@ -819,15 +854,147 @@ export function createTools(walletAddress?: string, userId?: string) {
             portfolio_address,
             withdraw_token,
             withdraw_amount,
-            tx: {
-              to: txData.to,
-              data: txData.data,
-              gas_limit: txData.gasLimit,
-              gas_price: txData.gasPrice,
-            },
+            tx: { to: txData.to, data: txData.data, gas_limit: txData.gasLimit, gas_price: txData.gasPrice },
           };
         } catch (err: any) {
           return { error: err?.message ?? "Failed to prepare withdrawal" };
+        }
+      },
+    }),
+
+    remove_velvet_token: tool({
+      description:
+        "Prepare a transaction to remove a token from a Velvet portfolio vault (asset managers only). Can remove fully or partially by percentage. Only call when user explicitly confirms.",
+      inputSchema: z.object({
+        rebalancing_address: z.string().describe("Rebalancing contract address from get_velvet_portfolios"),
+        token_address: z.string().describe("Address of the token to remove from the vault"),
+        partial: z.boolean().describe("If true, removes only a percentage of the token; if false, removes entirely"),
+        percentage: z.number().min(0).max(100).optional().describe("Percentage to remove (0–100) when partial=true"),
+      }),
+      execute: async ({ rebalancing_address, token_address, partial, percentage }) => {
+        try {
+          const { encodeRemovePortfolioToken } = await import("@/lib/velvet");
+          const tx = partial && percentage !== undefined
+            ? encodeRemovePortfolioToken(rebalancing_address, token_address, true, percentage)
+            : encodeRemovePortfolioToken(rebalancing_address, token_address, false);
+          return { pendingRemoveToken: true, token_address, partial, percentage, tx };
+        } catch (err: any) {
+          return { error: err?.message ?? "Failed to prepare token removal" };
+        }
+      },
+    }),
+
+    propose_velvet_fee: tool({
+      description:
+        "Propose a new fee for a Velvet portfolio (asset managers only). After proposing, the fee takes effect 28 days later via update_velvet_fee. Returns encoded tx data to sign.",
+      inputSchema: z.object({
+        asset_management_config: z.string().describe("AssetManagementConfig contract address from get_velvet_portfolios"),
+        fee_type: z.enum(["management", "performance", "entry_and_exit"]).describe("Which fee to change"),
+        new_fee_bps: z.number().min(0).describe("New fee in basis points (e.g. 100 = 1%). For entry_and_exit this is the entry fee."),
+        new_exit_fee_bps: z.number().min(0).optional().describe("New exit fee in basis points — only for fee_type 'entry_and_exit'"),
+      }),
+      execute: async ({ asset_management_config, fee_type, new_fee_bps, new_exit_fee_bps }) => {
+        try {
+          const { encodeFeeCall } = await import("@/lib/velvet");
+          const tx = encodeFeeCall(asset_management_config, fee_type, "propose", new_fee_bps, new_exit_fee_bps);
+          return {
+            pendingFeeProposal: true,
+            fee_type,
+            new_fee_bps,
+            new_exit_fee_bps,
+            note: "Fee will be active after calling update_velvet_fee in 28 days",
+            tx,
+          };
+        } catch (err: any) {
+          return { error: err?.message ?? "Failed to encode fee proposal" };
+        }
+      },
+    }),
+
+    update_velvet_fee: tool({
+      description:
+        "Finalize a previously proposed Velvet fee update (asset managers only). Can only succeed 28 days after the proposal. Can also cancel a pending proposal. Returns encoded tx data to sign.",
+      inputSchema: z.object({
+        asset_management_config: z.string().describe("AssetManagementConfig contract address from get_velvet_portfolios"),
+        fee_type: z.enum(["management", "performance", "entry_and_exit"]).describe("Which fee to update or cancel"),
+        action: z.enum(["update", "cancel"]).describe("'update' finalizes the fee after 28 days; 'cancel' deletes the pending proposal"),
+      }),
+      execute: async ({ asset_management_config, fee_type, action }) => {
+        try {
+          const { encodeFeeCall } = await import("@/lib/velvet");
+          const tx = encodeFeeCall(asset_management_config, fee_type, action);
+          return { pendingFeeAction: true, fee_type, action, tx };
+        } catch (err: any) {
+          return { error: err?.message ?? "Failed to encode fee action" };
+        }
+      },
+    }),
+
+    manage_velvet_whitelist: tool({
+      description:
+        "Add or remove users from a Velvet portfolio's depositor whitelist (asset managers only). Only whitelisted users can deposit into private portfolios. Returns encoded tx data to sign.",
+      inputSchema: z.object({
+        asset_management_config: z.string().describe("AssetManagementConfig contract address from get_velvet_portfolios"),
+        action: z.enum(["add", "remove"]).describe("'add' grants deposit access; 'remove' revokes it"),
+        users: z.array(z.string()).describe("Wallet addresses to add or remove from the whitelist"),
+      }),
+      execute: async ({ asset_management_config, action, users }) => {
+        try {
+          const { encodeWhitelistCall } = await import("@/lib/velvet");
+          const tx = encodeWhitelistCall(asset_management_config, action, users);
+          return { pendingWhitelistUpdate: true, action, users, tx };
+        } catch (err: any) {
+          return { error: err?.message ?? "Failed to encode whitelist update" };
+        }
+      },
+    }),
+
+    update_velvet_settings: tool({
+      description:
+        "Update Velvet portfolio settings (asset managers only): transferability, convert to public fund, or update the treasury address. Returns encoded tx data to sign.",
+      inputSchema: z.object({
+        asset_management_config: z.string().describe("AssetManagementConfig contract address from get_velvet_portfolios"),
+        setting: z.enum(["transferability", "convert_to_public", "treasury"]).describe("Which setting to update"),
+        transferable: z.boolean().optional().describe("For 'transferability': whether portfolio tokens can be transferred"),
+        public_transfer: z.boolean().optional().describe("For 'transferability': whether transfers to non-whitelisted addresses are allowed"),
+        new_treasury: z.string().optional().describe("For 'treasury': new address where management fees accumulate"),
+      }),
+      execute: async ({ asset_management_config, setting, transferable, public_transfer, new_treasury }) => {
+        try {
+          const { encodeTransferabilityCall, encodeConvertToPublicCall, encodeTreasuryCall } = await import("@/lib/velvet");
+          let tx: { to: string; data: string };
+          if (setting === "transferability") {
+            if (transferable === undefined) return { error: "transferable is required for transferability setting" };
+            tx = encodeTransferabilityCall(asset_management_config, transferable, public_transfer ?? false);
+          } else if (setting === "convert_to_public") {
+            tx = encodeConvertToPublicCall(asset_management_config);
+          } else {
+            if (!new_treasury) return { error: "new_treasury address is required for treasury setting" };
+            tx = encodeTreasuryCall(asset_management_config, new_treasury);
+          }
+          return { pendingSettingsUpdate: true, setting, tx };
+        } catch (err: any) {
+          return { error: err?.message ?? "Failed to encode settings update" };
+        }
+      },
+    }),
+
+    claim_velvet_removed_tokens: tool({
+      description:
+        "Claim the user's proportionate share of tokens that were removed from a Velvet portfolio vault. Use when the user mentions tokens were excluded or removed from a vault they hold.",
+      inputSchema: z.object({
+        token_exclusion_manager: z.string().describe("TokenExclusionManager contract address from get_velvet_portfolios"),
+        start_id: z.number().int().min(0).describe("Starting exclusion event ID to claim from"),
+        end_id: z.number().int().min(0).describe("Ending exclusion event ID to claim to (inclusive)"),
+      }),
+      execute: async ({ token_exclusion_manager, start_id, end_id }) => {
+        if (!walletAddress) return { error: "Wallet not connected" };
+        try {
+          const { encodeClaimRemovedTokens } = await import("@/lib/velvet");
+          const tx = encodeClaimRemovedTokens(token_exclusion_manager, walletAddress, start_id, end_id);
+          return { pendingClaim: true, user: walletAddress, start_id, end_id, tx };
+        } catch (err: any) {
+          return { error: err?.message ?? "Failed to encode claim" };
         }
       },
     }),
