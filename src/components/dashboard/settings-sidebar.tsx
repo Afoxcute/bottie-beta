@@ -60,7 +60,10 @@ export function SettingsSidebar({
     },
   });
 
-  const walletAddress = user?.smartWallet?.address ?? user?.wallet?.address;
+  const evmAddress = user?.smartWallet?.address ?? user?.wallet?.address;
+  const solanaAddress = (user?.linkedAccounts as any[])?.find(
+    (a) => a.type === "wallet" && a.chainType === "solana" && a.walletClientType === "privy"
+  )?.address;
   const email = user?.email?.address || user?.google?.email;
   const firstName = getUserFirstName(user) ?? "User";
   const initial = firstName.charAt(0).toUpperCase();
@@ -95,12 +98,24 @@ export function SettingsSidebar({
 
       {/* Wallet section */}
       <div className="mt-5 space-y-5">
-        {walletAddress && (
-          <div>
-            <span className="font-mono text-[10px] font-medium tracking-widest text-ink-light uppercase">Wallet</span>
-            <div className="mt-1.5">
-              <CopyableWallet address={walletAddress} />
-            </div>
+        {(evmAddress || solanaAddress) && (
+          <div className="space-y-3">
+            {evmAddress && (
+              <div>
+                <span className="font-mono text-[10px] font-medium tracking-widest text-ink-light uppercase">EVM Wallet</span>
+                <div className="mt-1.5">
+                  <CopyableWallet address={evmAddress} />
+                </div>
+              </div>
+            )}
+            {solanaAddress && (
+              <div>
+                <span className="font-mono text-[10px] font-medium tracking-widest text-ink-light uppercase">Solana Wallet</span>
+                <div className="mt-1.5">
+                  <CopyableWallet address={solanaAddress} />
+                </div>
+              </div>
+            )}
           </div>
         )}
 

@@ -1148,7 +1148,10 @@ function BuyCryptoModal({ provider, onClose, onSuccess }: {
   onSuccess: (order: OnrampOrderDetail) => void;
 }) {
   const { user } = usePrivy();
-  const walletAddress = user?.linkedAccounts?.find((a) => a.type === "wallet")?.address ?? "";
+  const evmAddress = user?.smartWallet?.address ?? user?.wallet?.address ?? "";
+  const solanaAddress = ((user?.linkedAccounts as any[]) ?? []).find(
+    (a) => a.type === "wallet" && a.chainType === "solana" && a.walletClientType === "privy"
+  )?.address ?? "";
 
   const [step, setStep] = useState<"form" | "qr">("form");
   const [pairs, setPairs] = useState<OnrampPair[]>([]);
@@ -1157,13 +1160,21 @@ function BuyCryptoModal({ provider, onClose, onSuccess }: {
   const [amount, setAmount] = useState("");
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
-  const [destAddress, setDestAddress] = useState(walletAddress);
+
+  // Auto-pick the right wallet address based on the selected pair's blockchain
+  const autoAddress = selectedPair?.blockchain?.toLowerCase() === "solana" ? solanaAddress : evmAddress;
+  const [destAddress, setDestAddress] = useState("");
   const [quote, setQuote] = useState<OnrampQuote | null>(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [order, setOrder] = useState<OnrampOrder | null>(null);
   const [orderStatus, setOrderStatus] = useState<OnrampStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  // Auto-fill destination address when pair or wallet changes
+  useEffect(() => {
+    setDestAddress(autoAddress);
+  }, [autoAddress]);
 
   // Load pairs
   useEffect(() => {
@@ -1348,10 +1359,10 @@ function BuyCryptoModal({ provider, onClose, onSuccess }: {
                   placeholder="Your wallet address"
                   className="mt-1.5 w-full rounded-xl border border-border bg-cream-dark/40 px-4 py-3 font-mono text-[11px] text-ink placeholder:text-ink-light/40 outline-none focus:border-sage/50"
                   required />
-                {walletAddress && destAddress !== walletAddress && (
-                  <button type="button" onClick={() => setDestAddress(walletAddress)}
+                {autoAddress && destAddress !== autoAddress && (
+                  <button type="button" onClick={() => setDestAddress(autoAddress)}
                     className="mt-1 font-mono text-[10px] text-sage hover:underline">
-                    Use my connected wallet
+                    Use my {selectedPair?.blockchain?.toLowerCase() === "solana" ? "Solana" : "EVM"} wallet
                   </button>
                 )}
               </div>

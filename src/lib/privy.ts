@@ -1,4 +1,5 @@
 import type { PrivyClientConfig } from "@privy-io/react-auth";
+import { toSolanaWalletConnectors } from "@privy-io/react-auth/solana";
 import { baseSepolia } from "viem/chains";
 
 export const privyConfig: PrivyClientConfig = {
@@ -6,14 +7,22 @@ export const privyConfig: PrivyClientConfig = {
   appearance: {
     theme: "light",
     accentColor: "#8FAE82",
-    walletChainType: "ethereum-only",
+    walletChainType: "ethereum-and-solana",
     walletList: ["metamask", "coinbase_wallet", "rainbow", "wallet_connect"],
   },
   embeddedWallets: {
     ethereum: {
       createOnLogin: "users-without-wallets",
     },
+    solana: {
+      createOnLogin: "all-users",
+    },
     showWalletUIs: false,
+  },
+  externalWallets: {
+    solana: {
+      connectors: toSolanaWalletConnectors(),
+    },
   },
   defaultChain: baseSepolia,
   supportedChains: [baseSepolia],
