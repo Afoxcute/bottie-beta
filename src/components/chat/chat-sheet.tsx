@@ -57,7 +57,7 @@ export function ChatSheet({ visible }: ChatSheetProps) {
     return new DefaultChatTransport({
       api: "/api/chat",
       body: liveBody,
-      headers: async () => {
+      headers: async (): Promise<Record<string, string>> => {
         const token = await getAccessTokenRef.current();
         return token ? { Authorization: `Bearer ${token}` } : {};
       },
