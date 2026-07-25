@@ -5,6 +5,7 @@ import { DEMO_BILLS, DEMO_ASSETS } from "@/lib/demo-data";
 import { db } from "@/lib/db";
 import { payments } from "@/lib/db/schema";
 import { getProvider } from "@/lib/banking/registry";
+import { callTool, isSanaConfigured } from "@/lib/sana";
 
 function getBankingProvider() {
   try { return getProvider("credible") as any; } catch { return null; }
@@ -658,5 +659,281 @@ export function createTools(walletAddress?: string, userId?: string) {
         }
       },
     }),
+
+    // ── Velvet Capital — Portfolio Management ────────────────────────────────
+
+    get_velvet_portfolios: tool({
+      description:
+        "List all Velvet Capital on-chain portfolios (vaults) owned by the user's wallet on Base. Returns portfolio names, IDs, rebalancing contract addresses, and vault addresses.",
+      inputSchema: z.object({
+        chain: z.enum(["base"]).optional().describe("Chain to query (default: base)"),
+      }),
+      execute: async ({ chain }) => {
+        if (!walletAddress) return { error: "Wallet not connected" };
+        try {
+          const { getPortfoliosByOwner } = await import("@/lib/velvet");
+          const portfolios = await getPortfoliosByOwner(walletAddress, chain ?? "base");
+          return {
+            portfolios: portfolios.map((p) => ({
+              portfolio_id: p.portfolioId,
+              name: p.name,
+              symbol: p.symbol,
+              portfolio_address: p.portfolio,
+              vault_address: p.vaultAddress,
+              rebalancing_address: p.rebalancing,
+              is_public: p.public,
+              chain: p.chainName,
+              created_at: p.createdAt,
+            })),
+            count: portfolios.length,
+          };
+        } catch (err: any) {
+          return { error: err?.message ?? "Failed to fetch portfolios" };
+        }
+      },
+    }),
+
+    get_velvet_portfolio_balance: tool({
+      description:
+        "Check how many portfolio tokens the user holds in a specific Velvet portfolio. Also useful to confirm the user has a position before withdrawing.",
+      inputSchema: z.object({
+        portfolio_address: z.string().describe("The portfolio contract address from get_velvet_portfolios"),
+      }),
+      execute: async ({ portfolio_address }) => {
+        if (!walletAddress) return { error: "Wallet not connected" };
+        try {
+          const { getPortfolioTokenBalance, getPortfolioTokens } = await import("@/lib/velvet");
+          const [balance, tokens] = await Promise.all([
+            getPortfolioTokenBalance(portfolio_address, walletAddress),
+            getPortfolioTokens(portfolio_address),
+          ]);
+          return {
+            portfolio_address,
+            user_address: walletAddress,
+            portfolio_token_balance: balance,
+            underlying_tokens: tokens,
+          };
+        } catch (err: any) {
+          return { error: err?.message ?? "Failed to fetch portfolio balance" };
+        }
+      },
+    }),
+
+    rebalance_velvet_portfolio: tool({
+      description:
+        "Prepare a rebalance transaction for a Velvet portfolio — swap one token for another within the vault. Returns a pending on-chain transaction the user must confirm. Only call when the user explicitly asks to rebalance.",
+      inputSchema: z.object({
+        rebalancing_address: z.string().describe("The rebalancing contract address from get_velvet_portfolios"),
+        sell_token: z.string().describe("Token address to sell"),
+        buy_token: z.string().describe("Token address to buy"),
+        sell_amount: z.string().describe("Amount to sell in the token's smallest unit (e.g. '1000000' for 1 USDC with 6 decimals)"),
+        remaining_tokens: z.array(z.string()).describe("Token addresses that will remain in the vault after the trade"),
+        slippage_bps: z.string().optional().describe("Slippage tolerance in basis points, default '100' (1%)"),
+      }),
+      execute: async ({ rebalancing_address, sell_token, buy_token, sell_amount, remaining_tokens, slippage_bps }) => {
+        if (!walletAddress) return { error: "Wallet not connected" };
+        try {
+          const { getRebalanceTxData } = await import("@/lib/velvet");
+          const txData = await getRebalanceTxData({
+            rebalanceAddress: rebalancing_address,
+            sellToken: sell_token,
+            buyToken: buy_token,
+            sellAmount: sell_amount,
+            slippage: slippage_bps ?? "100",
+            remainingTokens: remaining_tokens,
+            owner: walletAddress,
+          });
+          return {
+            pendingRebalance: true,
+            rebalancing_address,
+            new_tokens: txData.newTokens,
+            sell_tokens: txData.sellTokens,
+            sell_amounts: txData.sellAmounts,
+            handler: txData.handler,
+            call_data: txData.callData,
+            estimate_gas: txData.estimateGas,
+            gas_price: txData.gasPrice,
+          };
+        } catch (err: any) {
+          return { error: err?.message ?? "Failed to prepare rebalance" };
+        }
+      },
+    }),
+
+    deposit_velvet_portfolio: tool({
+      description:
+        "Prepare a deposit transaction to add tokens into a Velvet portfolio vault. Returns transaction data the user must sign and broadcast. Only call when the user explicitly confirms they want to deposit.",
+      inputSchema: z.object({
+        portfolio_address: z.string().describe("Portfolio contract address from get_velvet_portfolios"),
+        deposit_token: z.string().describe("ERC-20 token address to deposit"),
+        deposit_amount: z.string().describe("Amount to deposit in token's smallest unit (e.g. '1000000' for 1 USDC with 6 decimals)"),
+      }),
+      execute: async ({ portfolio_address, deposit_token, deposit_amount }) => {
+        if (!walletAddress) return { error: "Wallet not connected" };
+        try {
+          const { getDepositTxData } = await import("@/lib/velvet");
+          const txData = await getDepositTxData({
+            portfolio: portfolio_address,
+            depositAmount: deposit_amount,
+            depositToken: deposit_token,
+            user: walletAddress,
+          });
+          return {
+            pendingDeposit: true,
+            portfolio_address,
+            deposit_token,
+            deposit_amount,
+            tx: {
+              to: txData.to,
+              data: txData.data,
+              gas_limit: txData.gasLimit,
+              gas_price: txData.gasPrice,
+            },
+          };
+        } catch (err: any) {
+          return { error: err?.message ?? "Failed to prepare deposit" };
+        }
+      },
+    }),
+
+    withdraw_velvet_portfolio: tool({
+      description:
+        "Prepare a withdrawal transaction to remove tokens from a Velvet portfolio vault and receive an ERC-20 token. Returns transaction data the user must sign and broadcast. Only call when the user explicitly confirms they want to withdraw.",
+      inputSchema: z.object({
+        portfolio_address: z.string().describe("Portfolio contract address from get_velvet_portfolios"),
+        withdraw_token: z.string().describe("ERC-20 token address to receive after withdrawal"),
+        withdraw_amount: z.string().describe("Portfolio token amount to burn (in smallest unit, 18 decimals)"),
+      }),
+      execute: async ({ portfolio_address, withdraw_token, withdraw_amount }) => {
+        if (!walletAddress) return { error: "Wallet not connected" };
+        try {
+          const { getWithdrawTxData } = await import("@/lib/velvet");
+          const txData = await getWithdrawTxData({
+            portfolio: portfolio_address,
+            withdrawAmount: withdraw_amount,
+            withdrawToken: withdraw_token,
+            user: walletAddress,
+          });
+          return {
+            pendingWithdrawal: true,
+            portfolio_address,
+            withdraw_token,
+            withdraw_amount,
+            tx: {
+              to: txData.to,
+              data: txData.data,
+              gas_limit: txData.gasLimit,
+              gas_price: txData.gasPrice,
+            },
+          };
+        } catch (err: any) {
+          return { error: err?.message ?? "Failed to prepare withdrawal" };
+        }
+      },
+    }),
+
+    // ── Sanafi (Sana.bot) ─────────────────────────────────────────────────────
+
+    ...(isSanaConfigured() ? {
+      get_sanafi_portfolio: tool({
+        description:
+          "Get the user's Sanafi net worth and full token holdings on Solana. Returns total value in USD plus each token's balance and price.",
+        inputSchema: z.object({}),
+        execute: async () => {
+          try {
+            const result = await callTool("get_portfolio");
+            return result ?? { error: "No data returned" };
+          } catch (err: any) {
+            return { error: err?.message ?? "Failed to fetch portfolio" };
+          }
+        },
+      }),
+
+      get_sanafi_price: tool({
+        description: "Get the current price of a token (e.g. SOL, USDC, JUP) on Sanafi.",
+        inputSchema: z.object({
+          symbol: z.string().describe("Token symbol, e.g. SOL, USDC, JUP, BONK"),
+        }),
+        execute: async ({ symbol }) => {
+          try {
+            const result = await callTool("get_price", { symbol: symbol.toUpperCase() });
+            return result ?? { error: "No price data" };
+          } catch (err: any) {
+            return { error: err?.message ?? "Failed to fetch price" };
+          }
+        },
+      }),
+
+      get_sanafi_transactions: tool({
+        description:
+          "Get the user's recent Sanafi wallet transactions — deposits, swaps, and transfers.",
+        inputSchema: z.object({
+          limit: z.number().optional().describe("Number of transactions to return (default 10)"),
+        }),
+        execute: async ({ limit }) => {
+          try {
+            const result = await callTool("get_transactions", { limit: limit ?? 10 });
+            return result ?? { error: "No transactions" };
+          } catch (err: any) {
+            return { error: err?.message ?? "Failed to fetch transactions" };
+          }
+        },
+      }),
+
+      get_sanafi_account: tool({
+        description: "Get the user's Sanafi account details and notification preferences.",
+        inputSchema: z.object({}),
+        execute: async () => {
+          try {
+            const result = await callTool("get_account");
+            return result ?? { error: "No account data" };
+          } catch (err: any) {
+            return { error: err?.message ?? "Failed to fetch account" };
+          }
+        },
+      }),
+
+      get_sanafi_card: tool({
+        description:
+          "Get the user's Sanafi card details — status, masked card number, and available spending power.",
+        inputSchema: z.object({}),
+        execute: async () => {
+          try {
+            const result = await callTool("get_card");
+            return result ?? { error: "No card data" };
+          } catch (err: any) {
+            return { error: err?.message ?? "Failed to fetch card" };
+          }
+        },
+      }),
+
+      get_sanafi_card_balance: tool({
+        description: "Get the user's Sanafi card balance and spending power in USD.",
+        inputSchema: z.object({}),
+        execute: async () => {
+          try {
+            const result = await callTool("get_card_balance");
+            return result ?? { error: "No balance data" };
+          } catch (err: any) {
+            return { error: err?.message ?? "Failed to fetch card balance" };
+          }
+        },
+      }),
+
+      get_sanafi_card_transactions: tool({
+        description: "Get the user's recent Sanafi card spending transactions.",
+        inputSchema: z.object({
+          limit: z.number().optional().describe("Number of transactions to return (default 10)"),
+        }),
+        execute: async ({ limit }) => {
+          try {
+            const result = await callTool("get_card_transactions", { limit: limit ?? 10 });
+            return result ?? { error: "No card transactions" };
+          } catch (err: any) {
+            return { error: err?.message ?? "Failed to fetch card transactions" };
+          }
+        },
+      }),
+    } : {}),
   };
 }
