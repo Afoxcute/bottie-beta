@@ -3,6 +3,7 @@ interface UserContext {
   walletAddress?: string;
   solanaAddress?: string;
   walletBalance?: number;
+  solanaBalance?: number;
   totalBillsDueUsd?: number;
   portfolioValueUsd?: number;
   billCount?: number;
@@ -161,6 +162,9 @@ export function buildSystemPrompt(ctx: UserContext): string {
 
   if (ctx.walletBalance !== undefined)
     lines.push(`- EVM wallet balance: $${ctx.walletBalance.toFixed(2)} USDC`);
+
+  if (ctx.solanaBalance !== undefined)
+    lines.push(`- Solana wallet balance: $${ctx.solanaBalance.toFixed(2)} USDC`);
 
   if (ctx.billCount !== undefined)
     lines.push(`- Active bills: ${ctx.billCount}`);

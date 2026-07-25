@@ -8,6 +8,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import type { ReactNode } from "react";
 import { formatUsd } from "@/lib/format";
 import { getUserFirstName } from "@/lib/user-display-name";
+import { useSolanaBalance } from "@/hooks/use-solana-balance";
 
 interface SettingsSidebarProps {
   open: boolean;
@@ -60,10 +61,11 @@ export function SettingsSidebar({
     },
   });
 
+  const accounts = (user?.linkedAccounts as any[]) ?? [];
   const evmAddress = user?.smartWallet?.address ?? user?.wallet?.address;
-  const solanaAddress = (user?.linkedAccounts as any[])?.find(
-    (a) => a.type === "wallet" && a.chainType === "solana" && a.walletClientType === "privy"
-  )?.address;
+  const solanaWallet = accounts.find((a: any) => a.type === "wallet" && a.chainType === "solana" && a.walletClientType === "privy");
+  const solanaAddress = solanaWallet?.address as string | undefined;
+  const { balance: solanaBalanceSol, isLoading: solBalLoading } = useSolanaBalance(solanaAddress, solanaWallet?.id);
   const email = user?.email?.address || user?.google?.email;
   const firstName = getUserFirstName(user) ?? "User";
   const initial = firstName.charAt(0).toUpperCase();
@@ -121,9 +123,21 @@ export function SettingsSidebar({
 
         {walletBalanceUsd !== undefined && (
           <div>
-            <span className="font-mono text-[10px] font-medium tracking-widest text-ink-light uppercase">Balance</span>
+            <span className="font-mono text-[10px] font-medium tracking-widest text-ink-light uppercase">EVM Balance</span>
             <p className="mt-1 font-display text-xl text-ink">
-              {formatUsd(walletBalanceUsd)}
+              {formatUsd(walletBalanceUsd)} <span className="text-sm text-ink-light">USDC</span>
+            </p>
+          </div>
+        )}
+
+        {solanaAddress && (
+          <div>
+            <span className="font-mono text-[10px] font-medium tracking-widest text-ink-light uppercase">Solana Balance</span>
+            <p className="mt-1 font-display text-xl text-ink">
+              {solBalLoading
+                ? <span className="text-sm text-ink-light">Loading…</span>
+                : <>${solanaBalanceSol.toFixed(2)} <span className="text-sm text-ink-light">USDC</span></>
+              }
             </p>
           </div>
         )}

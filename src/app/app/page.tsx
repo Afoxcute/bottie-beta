@@ -10,6 +10,7 @@ import { PaymentsScreen } from "@/components/dashboard/payments-screen";
 import { BankingScreen } from "@/components/dashboard/banking-screen";
 import { FundWalletSheet } from "@/components/dashboard/fund-wallet-sheet";
 import { useUsdcBalance, LOW_BALANCE_THRESHOLD_USD } from "@/hooks/use-usdc-balance";
+import { useSolanaBalance } from "@/hooks/use-solana-balance";
 import { DEMO_BILLS, ASSET_PRICES } from "@/lib/demo-data";
 import { getUserFirstName, getTimeBasedGreeting } from "@/lib/user-display-name";
 
@@ -30,9 +31,15 @@ function DashboardInner() {
   const [showFundSheet, setShowFundSheet] = useState(false);
   const { paidBillIds, portfolio } = useDemoState();
 
+  const accounts = (user?.linkedAccounts as any[]) ?? [];
   const agentAddress = user?.wallet?.address as `0x${string}` | undefined;
+  const evmWallet = accounts.find((a: any) => a.chainType === "ethereum" && a.walletClientType === "privy");
   const { balance: usdcBalance, isLow: balanceIsLow, formatted: balanceFormatted } =
-    useUsdcBalance(agentAddress);
+    useUsdcBalance(agentAddress, evmWallet?.id);
+
+  const solanaWallet = accounts.find((a: any) => a.type === "wallet" && a.chainType === "solana" && a.walletClientType === "privy");
+  const solanaAddr = solanaWallet?.address as string | undefined;
+  const { balance: solBalance, formatted: solFormatted } = useSolanaBalance(solanaAddr, solanaWallet?.id);
   const firstName = getUserFirstName(user);
   const greeting = getTimeBasedGreeting();
 
@@ -149,21 +156,32 @@ function DashboardInner() {
           {/* Wallet balance card */}
           {agentAddress && (
             <div
-              className="w-[88px] shrink-0 cursor-pointer rounded-2xl border p-4 flex flex-col justify-between transition-colors hover:border-[#8FAE82]/50"
+              className="w-[100px] shrink-0 cursor-pointer rounded-2xl border p-4 flex flex-col gap-1.5 transition-colors hover:border-[#8FAE82]/50"
               style={{
                 background: "#1B1C19",
                 borderColor: balanceIsLow ? "rgba(251,191,36,0.4)" : "#2A2B27",
               }}
               onClick={() => setShowFundSheet(true)}
             >
-              <p className="text-[10px] text-[#A7A79A] font-medium leading-tight">Wallet</p>
-              <p
-                className="text-sm font-bold mt-1 leading-tight"
-                style={{ color: balanceIsLow ? "#fbbf24" : "#F2F0E8" }}
-              >
-                {balanceFormatted}
-              </p>
-              <p className="text-[10px] text-[#8FAE82] mt-1">+ Add</p>
+              <p className="text-[10px] text-[#A7A79A] font-medium leading-tight">Wallets</p>
+              <div>
+                <p className="text-[9px] text-[#A7A79A] leading-tight">EVM</p>
+                <p
+                  className="text-xs font-bold leading-tight"
+                  style={{ color: balanceIsLow ? "#fbbf24" : "#F2F0E8" }}
+                >
+                  {balanceFormatted}
+                </p>
+              </div>
+              {solanaAddr && (
+                <div>
+                  <p className="text-[9px] text-[#A7A79A] leading-tight">Solana</p>
+                  <p className="text-xs font-bold leading-tight text-[#F2F0E8]">
+                    {solFormatted}
+                  </p>
+                </div>
+              )}
+              <p className="text-[10px] text-[#8FAE82]">+ Add</p>
             </div>
           )}
         </div>

@@ -7,6 +7,7 @@ import { usePrivy } from "@privy-io/react-auth";
 import { useChatSheet } from "@/contexts/chat-context";
 import { getUserFirstName, getTimeBasedGreeting } from "@/lib/user-display-name";
 import { useUsdcBalance } from "@/hooks/use-usdc-balance";
+import { useSolanaBalance } from "@/hooks/use-solana-balance";
 import { MessageBubble } from "./message-bubble";
 import { ThinkingIndicator } from "./thinking-indicator";
 import { ToolApprovalCard } from "./tool-approval-card";
@@ -33,11 +34,14 @@ export function ChatSheet({ visible }: ChatSheetProps) {
   const name = getUserFirstName(user);
   const greeting = getTimeBasedGreeting();
 
+  const accounts = (user?.linkedAccounts as any[]) ?? [];
   const walletAddress = user?.smartWallet?.address ?? user?.wallet?.address;
-  const solanaAddress = ((user?.linkedAccounts as any[]) ?? []).find(
-    (a) => a.type === "wallet" && a.chainType === "solana" && a.walletClientType === "privy"
-  )?.address as string | undefined;
-  const { balance: walletBalance } = useUsdcBalance(walletAddress as `0x${string}` | undefined);
+  const evmWallet = accounts.find((a: any) => a.chainType === "ethereum" && a.walletClientType === "privy");
+  const { balance: walletBalance } = useUsdcBalance(walletAddress as `0x${string}` | undefined, evmWallet?.id);
+
+  const solanaWallet = accounts.find((a: any) => a.type === "wallet" && a.chainType === "solana" && a.walletClientType === "privy");
+  const solanaAddress = solanaWallet?.address as string | undefined;
+  const { balance: solanaBalance } = useSolanaBalance(solanaAddress, solanaWallet?.id);
 
   const bodyRef = useRef<Record<string, unknown>>({});
   bodyRef.current = {
@@ -45,6 +49,7 @@ export function ChatSheet({ visible }: ChatSheetProps) {
     solanaAddress,
     userName: name,
     walletBalance,
+    solanaBalance,
   };
 
   const getAccessTokenRef = useRef(getAccessToken);
@@ -52,7 +57,7 @@ export function ChatSheet({ visible }: ChatSheetProps) {
 
   const transport = useMemo(() => {
     const liveBody: Record<string, unknown> = {};
-    for (const key of ["walletAddress", "solanaAddress", "userName", "walletBalance"]) {
+    for (const key of ["walletAddress", "solanaAddress", "userName", "walletBalance", "solanaBalance"]) {
       Object.defineProperty(liveBody, key, {
         get: () => bodyRef.current[key],
         enumerable: true,

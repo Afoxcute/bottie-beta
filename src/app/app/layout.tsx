@@ -50,8 +50,11 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
 function AppShell({ children }: { children: React.ReactNode }) {
   const { isOpen, sidebarOpen, openSidebar, closeSidebar } = useChatSheet();
   const { user } = usePrivy();
-  const privyAddress = (user?.wallet?.address ?? undefined) as `0x${string}` | undefined;
-  const { balance } = useUsdcBalance(privyAddress);
+  const accounts = (user?.linkedAccounts as any[]) ?? [];
+
+  const evmWallet = accounts.find((a: any) => a.chainType === "ethereum" && a.walletClientType === "privy");
+  const privyAddress = (user?.smartWallet?.address ?? user?.wallet?.address) as `0x${string}` | undefined;
+  const { balance } = useUsdcBalance(privyAddress, evmWallet?.id);
 
   // Lock body scroll when chat sheet or sidebar is open
   useEffect(() => {

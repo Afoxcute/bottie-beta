@@ -27,6 +27,7 @@ export async function POST(req: Request) {
     solanaAddress,
     userName,
     walletBalance,
+    solanaBalance,
     totalBillsDueUsd,
     portfolioValueUsd,
     billCount,
@@ -36,6 +37,7 @@ export async function POST(req: Request) {
     solanaAddress?: string;
     userName?: string;
     walletBalance?: number;
+    solanaBalance?: number;
     totalBillsDueUsd?: number;
     portfolioValueUsd?: number;
     billCount?: number;
@@ -56,6 +58,7 @@ export async function POST(req: Request) {
       walletAddress,
       solanaAddress,
       walletBalance,
+      solanaBalance,
       totalBillsDueUsd,
       portfolioValueUsd,
       billCount,
