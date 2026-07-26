@@ -53,6 +53,18 @@ export const investments = pgTable("investments", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+// velvet_vault_prefs — one row per (userId, portfolioAddress), status tracks visibility
+export const velvetVaultPrefs = pgTable("velvet_vault_prefs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: text("user_id").notNull(),
+  portfolioAddress: text("portfolio_address").notNull(), // lowercase 0x address
+  status: text("status").notNull().default("added"),    // "added" | "hidden"
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("velvet_prefs_user_addr_idx").on(table.userId, table.portfolioAddress),
+]);
+
 // payments table
 export const payments = pgTable("payments", {
   id: uuid("id").primaryKey().defaultRandom(),

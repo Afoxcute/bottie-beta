@@ -6,6 +6,7 @@ import { DEMO_ASSETS, ASSET_PRICES, type DemoAsset } from "@/lib/demo-data";
 import { useDemoState, type PortfolioPosition } from "@/contexts/demo-state-context";
 import { PaymentModal } from "./payment-modal";
 import { useChatSheet } from "@/contexts/chat-context";
+import { VelvetTradingSection } from "./velvet-trading-section";
 
 const TYPE_LABELS: Record<string, string> = {
   stock: "Stock",
@@ -14,10 +15,11 @@ const TYPE_LABELS: Record<string, string> = {
 };
 
 const MARKET_TABS = [
-  { key: "all",   label: "All"      },
-  { key: "stock", label: "Stocks"   },
-  { key: "ipo",   label: "Pre-IPO"  },
-  { key: "etf",   label: "ETFs"     },
+  { key: "all",    label: "All"            },
+  { key: "stock",  label: "Stocks"         },
+  { key: "ipo",    label: "Pre-IPO"        },
+  { key: "etf",    label: "ETFs"           },
+  { key: "crypto", label: "Crypto Trading" },
 ] as const;
 
 function PortfolioCard({ pos }: { pos: PortfolioPosition }) {
@@ -272,7 +274,9 @@ export function InvestmentsScreen() {
             ))}
           </div>
 
-          <div className="flex flex-col gap-3">
+          {marketFilter === "crypto" && <VelvetTradingSection />}
+
+          {marketFilter !== "crypto" && <div className="flex flex-col gap-3">
             {marketEntries.map((asset) => {
               const ownedPos = portfolio.find((p) => p.symbol === asset.symbol);
               const isPos = asset.change24h >= 0;
@@ -310,7 +314,7 @@ export function InvestmentsScreen() {
                 </div>
               );
             })}
-          </div>
+          </div>}
         </>
       )}
 

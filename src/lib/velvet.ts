@@ -13,8 +13,16 @@ function getClient() {
   });
 }
 
+const BROWSER_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+  "Accept": "application/json, text/plain, */*",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Origin": "https://velvet.capital",
+  "Referer": "https://velvet.capital/",
+};
+
 async function apiGet<T>(url: string): Promise<T> {
-  const res = await fetch(url, { next: { revalidate: 30 } });
+  const res = await fetch(url, { headers: BROWSER_HEADERS, next: { revalidate: 30 } });
   if (!res.ok) throw new Error(`Velvet API ${res.status}: ${await res.text()}`);
   return res.json();
 }
@@ -22,7 +30,7 @@ async function apiGet<T>(url: string): Promise<T> {
 async function apiPost<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...BROWSER_HEADERS },
     body: JSON.stringify(body),
     cache: "no-store",
   });
@@ -37,6 +45,50 @@ const PORTFOLIO_ABI = parseAbi([
   "function totalSupply() external view returns (uint256)",
   "function getTokens() external view returns (address[])",
 ]);
+
+// Metadata getters present on Velvet portfolio contracts
+const PORTFOLIO_META_ABI = parseAbi([
+  "function vault() external view returns (address)",
+  "function assetManagementConfig() external view returns (address)",
+  "function tokenExclusionManager() external view returns (address)",
+  "function name() external view returns (string)",
+  "function symbol() external view returns (string)",
+]);
+
+const ASSET_MGMT_META_ABI = parseAbi([
+  "function rebalancing() external view returns (address)",
+]);
+
+// Read a Velvet portfolio's related contract addresses from chain
+export async function getPortfolioAddresses(portfolioAddress: string) {
+  const client = getClient();
+  const addr = portfolioAddress as `0x${string}`;
+  const [vaultAddr, assetMgmtAddr, tokenExclusionAddr, name, symbol] = await Promise.all([
+    client.readContract({ address: addr, abi: PORTFOLIO_META_ABI, functionName: "vault" }).catch(() => null as string | null),
+    client.readContract({ address: addr, abi: PORTFOLIO_META_ABI, functionName: "assetManagementConfig" }).catch(() => null as string | null),
+    client.readContract({ address: addr, abi: PORTFOLIO_META_ABI, functionName: "tokenExclusionManager" }).catch(() => null as string | null),
+    client.readContract({ address: addr, abi: PORTFOLIO_META_ABI, functionName: "name" }).catch(() => "My Vault"),
+    client.readContract({ address: addr, abi: PORTFOLIO_META_ABI, functionName: "symbol" }).catch(() => "VAULT"),
+  ]);
+
+  let rebalancingAddr: string | null = null;
+  if (assetMgmtAddr) {
+    rebalancingAddr = await client.readContract({
+      address: assetMgmtAddr as `0x${string}`,
+      abi: ASSET_MGMT_META_ABI,
+      functionName: "rebalancing",
+    }).catch(() => null);
+  }
+
+  return {
+    name: name as string,
+    symbol: symbol as string,
+    vault: vaultAddr as string,
+    assetManagementConfig: assetMgmtAddr as string,
+    tokenExclusionManager: tokenExclusionAddr as string,
+    rebalancing: rebalancingAddr,
+  };
+}
 
 const REBALANCING_ABI = parseAbi([
   "function updateTokens((address[] _newTokens, address[] _sellTokens, uint256[] _sellAmounts, address _handler, bytes _callData) calldata rebalanceData) external",
