@@ -5,7 +5,6 @@ import { DEMO_BILLS, DEMO_ASSETS } from "@/lib/demo-data";
 import { db } from "@/lib/db";
 import { payments } from "@/lib/db/schema";
 import { getProvider } from "@/lib/banking/registry";
-import { callTool, isSanaConfigured } from "@/lib/sana";
 
 function getBankingProvider() {
   try { return getProvider("credible") as any; } catch { return null; }
@@ -1008,108 +1007,5 @@ export function createTools(walletAddress?: string, userId?: string, solanaAddre
       },
     }),
 
-    // ── Sanafi (Sana.bot) ─────────────────────────────────────────────────────
-
-    ...(isSanaConfigured() ? {
-      get_sanafi_portfolio: tool({
-        description:
-          "Get the user's Sanafi net worth and full token holdings on Solana. Returns total value in USD plus each token's balance and price.",
-        inputSchema: z.object({}),
-        execute: async () => {
-          try {
-            const result = await callTool("get_portfolio");
-            return result ?? { error: "No data returned" };
-          } catch (err: any) {
-            return { error: err?.message ?? "Failed to fetch portfolio" };
-          }
-        },
-      }),
-
-      get_sanafi_price: tool({
-        description: "Get the current price of a token (e.g. SOL, USDC, JUP) on Sanafi.",
-        inputSchema: z.object({
-          symbol: z.string().describe("Token symbol, e.g. SOL, USDC, JUP, BONK"),
-        }),
-        execute: async ({ symbol }) => {
-          try {
-            const result = await callTool("get_price", { symbol: symbol.toUpperCase() });
-            return result ?? { error: "No price data" };
-          } catch (err: any) {
-            return { error: err?.message ?? "Failed to fetch price" };
-          }
-        },
-      }),
-
-      get_sanafi_transactions: tool({
-        description:
-          "Get the user's recent Sanafi wallet transactions — deposits, swaps, and transfers.",
-        inputSchema: z.object({
-          limit: z.number().optional().describe("Number of transactions to return (default 10)"),
-        }),
-        execute: async ({ limit }) => {
-          try {
-            const result = await callTool("get_transactions", { limit: limit ?? 10 });
-            return result ?? { error: "No transactions" };
-          } catch (err: any) {
-            return { error: err?.message ?? "Failed to fetch transactions" };
-          }
-        },
-      }),
-
-      get_sanafi_account: tool({
-        description: "Get the user's Sanafi account details and notification preferences.",
-        inputSchema: z.object({}),
-        execute: async () => {
-          try {
-            const result = await callTool("get_account");
-            return result ?? { error: "No account data" };
-          } catch (err: any) {
-            return { error: err?.message ?? "Failed to fetch account" };
-          }
-        },
-      }),
-
-      get_sanafi_card: tool({
-        description:
-          "Get the user's Sanafi card details — status, masked card number, and available spending power.",
-        inputSchema: z.object({}),
-        execute: async () => {
-          try {
-            const result = await callTool("get_card");
-            return result ?? { error: "No card data" };
-          } catch (err: any) {
-            return { error: err?.message ?? "Failed to fetch card" };
-          }
-        },
-      }),
-
-      get_sanafi_card_balance: tool({
-        description: "Get the user's Sanafi card balance and spending power in USD.",
-        inputSchema: z.object({}),
-        execute: async () => {
-          try {
-            const result = await callTool("get_card_balance");
-            return result ?? { error: "No balance data" };
-          } catch (err: any) {
-            return { error: err?.message ?? "Failed to fetch card balance" };
-          }
-        },
-      }),
-
-      get_sanafi_card_transactions: tool({
-        description: "Get the user's recent Sanafi card spending transactions.",
-        inputSchema: z.object({
-          limit: z.number().optional().describe("Number of transactions to return (default 10)"),
-        }),
-        execute: async ({ limit }) => {
-          try {
-            const result = await callTool("get_card_transactions", { limit: limit ?? 10 });
-            return result ?? { error: "No card transactions" };
-          } catch (err: any) {
-            return { error: err?.message ?? "Failed to fetch card transactions" };
-          }
-        },
-      }),
-    } : {}),
   };
 }
