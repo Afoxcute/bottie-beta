@@ -7,6 +7,7 @@ import { usePrivy } from "@privy-io/react-auth";
 import { useChatSheet } from "@/contexts/chat-context";
 import { getUserFirstName, getTimeBasedGreeting } from "@/lib/user-display-name";
 import { useUsdcBalance } from "@/hooks/use-usdc-balance";
+import { useDemoState } from "@/contexts/demo-state-context";
 import { useSolanaBalance } from "@/hooks/use-solana-balance";
 import { MessageBubble } from "./message-bubble";
 import { ThinkingIndicator } from "./thinking-indicator";
@@ -34,6 +35,8 @@ export function ChatSheet({ visible }: ChatSheetProps) {
   const name = getUserFirstName(user);
   const greeting = getTimeBasedGreeting();
 
+  const { paidBillIds } = useDemoState();
+
   const accounts = (user?.linkedAccounts as any[]) ?? [];
   const walletAddress = user?.smartWallet?.address ?? user?.wallet?.address;
   const evmWallet = accounts.find((a: any) => a.chainType === "ethereum" && a.walletClientType === "privy");
@@ -50,6 +53,7 @@ export function ChatSheet({ visible }: ChatSheetProps) {
     userName: name,
     walletBalance,
     solanaBalance,
+    paidBillIds,
   };
 
   const getAccessTokenRef = useRef(getAccessToken);
@@ -57,7 +61,7 @@ export function ChatSheet({ visible }: ChatSheetProps) {
 
   const transport = useMemo(() => {
     const liveBody: Record<string, unknown> = {};
-    for (const key of ["walletAddress", "solanaAddress", "userName", "walletBalance", "solanaBalance"]) {
+    for (const key of ["walletAddress", "solanaAddress", "userName", "walletBalance", "solanaBalance", "paidBillIds"]) {
       Object.defineProperty(liveBody, key, {
         get: () => bodyRef.current[key],
         enumerable: true,
@@ -128,13 +132,17 @@ export function ChatSheet({ visible }: ChatSheetProps) {
     return () => el.removeEventListener("scroll", onScroll);
   }, [isBusy]);
 
-  // Auto-scroll to bottom when messages change (unless user scrolled up)
+  // Auto-scroll to bottom when messages change or streaming ends (unless user scrolled up).
+  // setTimeout lets the DOM paint the new content (e.g. Confirm card) before measuring scrollHeight.
   useEffect(() => {
     if (!scrollRef.current || !visible) return;
     if (userScrolledRef.current) return;
     const el = scrollRef.current;
-    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [messages, visible]);
+    const id = setTimeout(() => {
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    }, 60);
+    return () => clearTimeout(id);
+  }, [messages, status, visible]);
 
   return (
     <>
@@ -183,9 +191,13 @@ export function ChatSheet({ visible }: ChatSheetProps) {
               const hasText = message.parts.some(
                 (p) => p.type === "text" && p.text.trim(),
               );
-              const hasActionToolParts = message.parts.some(
-                (p) => p.type.startsWith("tool-"),
-              );
+              const hasVisibleToolPart = message.parts.some((p) => {
+                if (!p.type.startsWith("tool-") || !("toolCallId" in p)) return false;
+                const tp = p as { type: string; state: string; output?: unknown };
+                const tn = tp.type.slice(5);
+                if (["deposit", "withdraw", "swap_and_deposit", "swap"].includes(tn)) return true;
+                return tp.state === "output-available" && !!tp.output;
+              });
 
               return (
                 <div key={message.id} data-role={message.role}>
@@ -234,7 +246,7 @@ export function ChatSheet({ visible }: ChatSheetProps) {
                   {message.role === "assistant" && !hasText && isBusy && (
                     <ThinkingIndicator />
                   )}
-                  {message.role === "assistant" && !hasText && !hasActionToolParts && !isBusy && (
+                  {message.role === "assistant" && !hasText && !hasVisibleToolPart && !isBusy && (
                     <MessageBubble role="assistant" text="Let me try that again — could you rephrase?" />
                   )}
                 </div>
@@ -247,7 +259,7 @@ export function ChatSheet({ visible }: ChatSheetProps) {
               </div>
             )}
             {/* Error fallback when request fails without creating assistant message */}
-            {status === "error" && messages.length > 0 && messages[messages.length - 1].role === "user" && (
+            {status !== "submitted" && status !== "streaming" && messages.length > 0 && messages[messages.length - 1].role === "user" && (
               <div data-role="assistant">
                 <MessageBubble role="assistant" text="Something went wrong — please try again." />
               </div>

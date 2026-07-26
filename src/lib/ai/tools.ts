@@ -11,7 +11,7 @@ function getBankingProvider() {
   try { return getProvider("credible") as any; } catch { return null; }
 }
 
-export function createTools(walletAddress?: string, userId?: string, solanaAddress?: string) {
+export function createTools(walletAddress?: string, userId?: string, solanaAddress?: string, paidBillIds: string[] = []) {
   // Pick the right address for a given blockchain context
   function addressFor(blockchain?: string): string {
     const chain = (blockchain ?? "").toLowerCase();
@@ -34,17 +34,17 @@ export function createTools(walletAddress?: string, userId?: string, solanaAddre
         const list = category
           ? DEMO_BILLS.filter((b) => b.category === category)
           : DEMO_BILLS;
-        return {
-          bills: list.map((b) => ({
-            id: b.id,
-            name: b.name,
-            category: b.category,
-            amount: b.amount,
-            description: b.description,
-            dueDay: b.dueDay,
-          })),
-          count: list.length,
-        };
+        const bills = list.map((b) => ({
+          id: b.id,
+          name: b.name,
+          category: b.category,
+          amount: b.amount,
+          description: b.description,
+          dueDay: b.dueDay,
+          active: paidBillIds.includes(b.id),
+        }));
+        const activeCount = bills.filter((b) => b.active).length;
+        return { bills, count: list.length, activeCount };
       },
     }),
 
