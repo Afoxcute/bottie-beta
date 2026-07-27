@@ -3,14 +3,15 @@
 import { useState, useCallback, useEffect } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import { useSignTransaction } from "@privy-io/react-auth/solana";
-import { Transaction } from "@solana/web3.js";
+import { Transaction, Keypair } from "@solana/web3.js";
+import { Connection } from "@solana/web3.js";
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type SignFn = (...args: any[]) => Promise<any>;
 
-const ER_RPC = "https://flash.magicblock.xyz";
+// Swap, liquidity, staking, and rewards are all WithAction txs — they go to mainnet Solana, not ER
 
 async function signAndSendTx(base64Tx: string, signTransaction: SignFn): Promise<string> {
   const txBuf = Buffer.from(base64Tx, "base64");
@@ -20,7 +21,7 @@ async function signAndSendTx(base64Tx: string, signTransaction: SignFn): Promise
   const signed: Transaction = result?.signedTransaction ?? result;
   const serialized = signed.serialize();
   const b64 = Buffer.from(serialized).toString("base64");
-  const resp = await fetch(ER_RPC, {
+  const resp = await fetch(SOL_RPC_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "sendTransaction", params: [b64, { encoding: "base64" }] }),
@@ -424,6 +425,89 @@ function ReferralPanel({ solanaAddress, signTransaction }: { solanaAddress: stri
   );
 }
 
+// ── Migrate FLP ↔ sFLP ────────────────────────────────────────────────────────
+
+function MigratePanel({ solanaAddress, signTransaction }: { solanaAddress: string; signTransaction: SignFn }) {
+  const [direction, setDirection] = useState<"to-sflp" | "to-flp">("to-sflp");
+  const [amount, setAmount] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState<TxStatus>(null);
+
+  const submit = async () => {
+    const amt = parseFloat(amount);
+    if (!amt) return;
+    setLoading(true); setStatus(null);
+    try {
+      const url = direction === "to-sflp" ? "/api/flash/migrate-stake" : "/api/flash/migrate-flp";
+      const bodyKey = direction === "to-sflp" ? "flpAmount" : "sflpAmount";
+      const r = await fetch(url, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ownerAddress: solanaAddress, [bodyKey]: amt }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const { transaction } = await r.json() as { transaction: string };
+      const sig = await signAndSendTx(transaction, signTransaction);
+      setStatus({ sig });
+    } catch (e) { setStatus({ error: (e as Error).message }); }
+    finally { setLoading(false); }
+  };
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-zinc-400">Convert between staked FLP (manual rewards) and sFLP (auto-compounding).</p>
+      <div className="flex gap-1">
+        {([["to-sflp", "FLP → sFLP"], ["to-flp", "sFLP → FLP"]] as const).map(([id, label]) => (
+          <button key={id} onClick={() => { setDirection(id); setAmount(""); setStatus(null); }}
+            className={`flex-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${direction === id ? "bg-blue-600 text-white" : "bg-zinc-800 text-zinc-400 hover:text-white"}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+      <input type="number" min="0" value={amount} onChange={e => setAmount(e.target.value)}
+        placeholder={direction === "to-sflp" ? "FLP amount to convert" : "sFLP amount to convert"}
+        className="w-full bg-zinc-800 rounded-lg px-3 py-2 text-sm text-white border border-zinc-700" />
+      <button onClick={submit} disabled={loading || !amount}
+        className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-semibold transition-colors">
+        {loading ? "Processing…" : direction === "to-sflp" ? "Migrate to sFLP" : "Migrate to FLP"}
+      </button>
+      <TxResult status={status} onClose={() => setStatus(null)} />
+    </div>
+  );
+}
+
+// ── Collect Revenue ───────────────────────────────────────────────────────────
+
+function CollectRevenuePanel({ solanaAddress, signTransaction }: { solanaAddress: string; signTransaction: SignFn }) {
+  const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState<TxStatus>(null);
+
+  const collect = async () => {
+    setLoading(true); setStatus(null);
+    try {
+      const r = await fetch("/api/flash/collect-revenue", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ownerAddress: solanaAddress }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const { transaction } = await r.json() as { transaction: string };
+      const sig = await signAndSendTx(transaction, signTransaction);
+      setStatus({ sig });
+    } catch (e) { setStatus({ error: (e as Error).message }); }
+    finally { setLoading(false); }
+  };
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-zinc-400">Collect your referral program revenue share (paid in USDC). Only available if you have referred active traders.</p>
+      <button onClick={collect} disabled={loading}
+        className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-semibold transition-colors">
+        {loading ? "Collecting…" : "Collect Revenue"}
+      </button>
+      <TxResult status={status} onClose={() => setStatus(null)} />
+    </div>
+  );
+}
+
 // ── Trade Vault ───────────────────────────────────────────────────────────────
 
 function TradeVaultPanel({ solanaAddress, signTransaction }: { solanaAddress: string; signTransaction: SignFn }) {
@@ -481,15 +565,155 @@ function TradeVaultPanel({ solanaAddress, signTransaction }: { solanaAddress: st
 
 // ── Main section ──────────────────────────────────────────────────────────────
 
-type Tab = "swap" | "liquidity" | "staking" | "vault" | "rebates" | "referral";
+// ── Session Keys ──────────────────────────────────────────────────────────────
+
+const SESSION_KEY = "flash_session_keypair";
+const SOL_RPC_URL = "https://api.mainnet-beta.solana.com";
+
+function loadStoredSession(): { pubkey: string; secretKey: number[]; expiresAt: number } | null {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const s = JSON.parse(raw);
+    if (s.expiresAt < Date.now()) { localStorage.removeItem(SESSION_KEY); return null; }
+    return s;
+  } catch { return null; }
+}
+
+function SessionPanel({ solanaAddress, signTransaction }: { solanaAddress: string; signTransaction: SignFn }) {
+  const [session, setSession] = useState<{ pubkey: string; expiresAt: number } | null>(null);
+  const [duration, setDuration] = useState(8);
+  const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState<TxStatus>(null);
+
+  useEffect(() => {
+    const s = loadStoredSession();
+    if (s) setSession({ pubkey: s.pubkey, expiresAt: s.expiresAt });
+  }, []);
+
+  const createSession = async () => {
+    setLoading(true); setStatus(null);
+    try {
+      const sessionKp = Keypair.generate();
+      const sessionPubkey = sessionKp.publicKey.toBase58();
+
+      const r = await fetch("/api/flash/create-session", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ownerAddress: solanaAddress, sessionSignerPubkey: sessionPubkey, durationHours: duration }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const { transaction: base64Tx } = await r.json() as { transaction: string };
+
+      // Deserialize, have the session keypair sign first, then Privy owner signs
+      const txBuf = Buffer.from(base64Tx, "base64");
+      const tx = Transaction.from(txBuf);
+      tx.partialSign(sessionKp);
+      const partialSerialized = tx.serialize({ requireAllSignatures: false });
+      const partialB64 = Buffer.from(partialSerialized).toString("base64");
+
+      const result = await signTransaction({ transaction: Buffer.from(partialB64, "base64") });
+      const signed: Transaction = result?.signedTransaction ?? result;
+      const finalSerialized = signed.serialize();
+
+      const conn = new Connection(SOL_RPC_URL, "confirmed");
+      const sig = await conn.sendRawTransaction(finalSerialized, { skipPreflight: false });
+      await conn.confirmTransaction(sig, "confirmed");
+
+      const expiresAt = Date.now() + duration * 60 * 60 * 1000;
+      localStorage.setItem(SESSION_KEY, JSON.stringify({
+        pubkey: sessionPubkey,
+        secretKey: Array.from(sessionKp.secretKey),
+        expiresAt,
+      }));
+      setSession({ pubkey: sessionPubkey, expiresAt });
+      setStatus({ sig });
+    } catch (e) { setStatus({ error: (e as Error).message }); }
+    finally { setLoading(false); }
+  };
+
+  const revokeSession = async () => {
+    const stored = loadStoredSession();
+    if (!stored) { setStatus({ error: "No active session found" }); return; }
+    setLoading(true); setStatus(null);
+    try {
+      const r = await fetch("/api/flash/revoke-session", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ownerAddress: solanaAddress, sessionSignerPubkey: stored.pubkey }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const { transaction: base64Tx } = await r.json() as { transaction: string };
+      const sig = await signAndSendTx(base64Tx, signTransaction);
+      localStorage.removeItem(SESSION_KEY);
+      setSession(null);
+      setStatus({ sig });
+    } catch (e) { setStatus({ error: (e as Error).message }); }
+    finally { setLoading(false); }
+  };
+
+  const expiresIn = session
+    ? Math.max(0, Math.round((session.expiresAt - Date.now()) / (1000 * 60)))
+    : null;
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-zinc-400">
+        A trading session lets Bottie execute Flash trades without a wallet popup every time. The session keypair is stored locally in your browser and expires automatically.
+      </p>
+
+      {session ? (
+        <div className="rounded-xl bg-green-500/10 border border-green-500/20 p-3 space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-green-400 animate-pulse" />
+            <span className="text-sm text-green-400 font-medium">Session active</span>
+          </div>
+          <p className="text-xs text-zinc-400">Expires in ~{expiresIn}m</p>
+          <p className="text-xs text-zinc-500 font-mono truncate">{session.pubkey}</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <label className="text-xs text-zinc-400">Duration</label>
+          <div className="flex gap-1 flex-wrap">
+            {[1, 4, 8, 24].map(h => (
+              <button key={h} onClick={() => setDuration(h)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${duration === h ? "bg-blue-600 text-white" : "bg-zinc-800 text-zinc-400 hover:text-white"}`}>
+                {h}h
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="flex gap-2">
+        {!session && (
+          <button onClick={createSession} disabled={loading}
+            className="flex-1 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-semibold transition-colors">
+            {loading ? "Creating…" : "Start Session"}
+          </button>
+        )}
+        {session && (
+          <button onClick={revokeSession} disabled={loading}
+            className="flex-1 py-3 rounded-xl bg-red-600/80 hover:bg-red-500 disabled:opacity-50 text-white text-sm font-semibold transition-colors">
+            {loading ? "Revoking…" : "End Session"}
+          </button>
+        )}
+      </div>
+      <TxResult status={status} onClose={() => setStatus(null)} />
+    </div>
+  );
+}
+
+type Tab = "swap" | "liquidity" | "staking" | "vault" | "rebates" | "referral" | "migrate" | "revenue" | "session";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "swap", label: "Swap" },
   { id: "liquidity", label: "Liquidity" },
   { id: "staking", label: "Staking" },
+  { id: "migrate", label: "Migrate" },
   { id: "vault", label: "Trade Vault" },
   { id: "rebates", label: "Rebates" },
+  { id: "revenue", label: "Revenue" },
   { id: "referral", label: "Referral" },
+  { id: "session", label: "Session" },
 ];
 
 export function FlashExtrasSection() {
@@ -531,7 +755,10 @@ export function FlashExtrasSection() {
         {tab === "staking" && <StakingPanel solanaAddress={solAddr} signTransaction={signTransaction} />}
         {tab === "vault" && <TradeVaultPanel solanaAddress={solAddr} signTransaction={signTransaction} />}
         {tab === "rebates" && <RebatesPanel solanaAddress={solAddr} signTransaction={signTransaction} />}
+        {tab === "revenue" && <CollectRevenuePanel solanaAddress={solAddr} signTransaction={signTransaction} />}
         {tab === "referral" && <ReferralPanel solanaAddress={solAddr} signTransaction={signTransaction} />}
+        {tab === "migrate" && <MigratePanel solanaAddress={solAddr} signTransaction={signTransaction} />}
+        {tab === "session" && <SessionPanel solanaAddress={solAddr} signTransaction={signTransaction} />}
       </div>
     </div>
   );

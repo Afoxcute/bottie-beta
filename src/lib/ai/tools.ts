@@ -358,6 +358,38 @@ export function createTools(walletAddress?: string, userId?: string, solanaAddre
       },
     }),
 
+    // ── Solana Nanopayments (x402 / MPP via @solana/pay-kit) ─────────────────
+
+    get_solpay_balance: tool({
+      description:
+        "Check the agent's Solana nanopayment wallet balance (SOL and USDC on Solana mainnet). This is a dedicated server wallet separate from the user's Solana wallet.",
+      inputSchema: z.object({}),
+      execute: async () => {
+        if (!process.env.SOLANA_AGENT_PRIVATE_KEY)
+          return { error: "SOLANA_AGENT_PRIVATE_KEY not configured" };
+        try {
+          const { getSolPayBalance } = await import("@/lib/solana-pay-kit");
+          return await getSolPayBalance();
+        } catch (err: any) { return { error: err?.message ?? "Failed to fetch balance" }; }
+      },
+    }),
+
+    solpay_pay: tool({
+      description:
+        "Pay for an x402 or MPP-protected resource using the agent's Solana wallet (USDC on Solana mainnet). Transparently handles the 402 handshake and retries the request after payment.",
+      inputSchema: z.object({
+        url: z.string().url().describe("Full URL of the x402 or MPP-protected resource to fetch and pay for"),
+      }),
+      execute: async ({ url }) => {
+        if (!process.env.SOLANA_AGENT_PRIVATE_KEY)
+          return { error: "SOLANA_AGENT_PRIVATE_KEY not configured" };
+        try {
+          const { solPayFetch } = await import("@/lib/solana-pay-kit");
+          return await solPayFetch(url);
+        } catch (err: any) { return { error: err?.message ?? "Payment failed" }; }
+      },
+    }),
+
     // ── Banking — Onramp (INR → Crypto) ──────────────────────────────────────
 
     get_onramp_pairs: tool({
@@ -959,31 +991,840 @@ export function createTools(walletAddress?: string, userId?: string, solanaAddre
 
     update_velvet_settings: tool({
       description:
-        "Update Velvet portfolio settings (asset managers only): transferability, convert to public fund, or update the treasury address. Returns encoded tx data to sign.",
+        "Update Velvet portfolio settings (asset managers only): transferability, convert to public fund, update treasury address, set minimum holding amount, set initial portfolio amount, or enable Uniswap V3 management. Returns encoded tx data to sign.",
       inputSchema: z.object({
         asset_management_config: z.string().describe("AssetManagementConfig contract address from get_velvet_portfolios"),
-        setting: z.enum(["transferability", "convert_to_public", "treasury"]).describe("Which setting to update"),
+        setting: z.enum(["transferability", "convert_to_public", "treasury", "min_holding_amount", "initial_amount", "enable_uniswap_v3"]).describe("Which setting to update"),
         transferable: z.boolean().optional().describe("For 'transferability': whether portfolio tokens can be transferred"),
         public_transfer: z.boolean().optional().describe("For 'transferability': whether transfers to non-whitelisted addresses are allowed"),
         new_treasury: z.string().optional().describe("For 'treasury': new address where management fees accumulate"),
+        amount_wei: z.string().optional().describe("For 'min_holding_amount' or 'initial_amount': amount in wei (18 decimals)"),
       }),
-      execute: async ({ asset_management_config, setting, transferable, public_transfer, new_treasury }) => {
+      execute: async ({ asset_management_config, setting, transferable, public_transfer, new_treasury, amount_wei }) => {
         try {
-          const { encodeTransferabilityCall, encodeConvertToPublicCall, encodeTreasuryCall } = await import("@/lib/velvet");
+          const lib = await import("@/lib/velvet");
           let tx: { to: string; data: string };
           if (setting === "transferability") {
             if (transferable === undefined) return { error: "transferable is required for transferability setting" };
-            tx = encodeTransferabilityCall(asset_management_config, transferable, public_transfer ?? false);
+            tx = lib.encodeTransferabilityCall(asset_management_config, transferable, public_transfer ?? false);
           } else if (setting === "convert_to_public") {
-            tx = encodeConvertToPublicCall(asset_management_config);
-          } else {
+            tx = lib.encodeConvertToPublicCall(asset_management_config);
+          } else if (setting === "treasury") {
             if (!new_treasury) return { error: "new_treasury address is required for treasury setting" };
-            tx = encodeTreasuryCall(asset_management_config, new_treasury);
+            tx = lib.encodeTreasuryCall(asset_management_config, new_treasury);
+          } else if (setting === "min_holding_amount") {
+            if (!amount_wei) return { error: "amount_wei is required for min_holding_amount" };
+            tx = lib.encodeMinHoldingAmountCall(asset_management_config, BigInt(amount_wei));
+          } else if (setting === "initial_amount") {
+            if (!amount_wei) return { error: "amount_wei is required for initial_amount" };
+            tx = lib.encodeInitialPortfolioAmountCall(asset_management_config, BigInt(amount_wei));
+          } else {
+            tx = lib.encodeEnableUniswapV3ManagerCall(asset_management_config);
           }
           return { pendingSettingsUpdate: true, setting, tx };
         } catch (err: any) {
           return { error: err?.message ?? "Failed to encode settings update" };
         }
+      },
+    }),
+
+    manage_velvet_collateral: tool({
+      description:
+        "Enable or disable specific tokens as collateral in a Velvet portfolio vault (asset managers only). Collateral tokens can be used for borrowing against the vault's holdings. Returns encoded tx data to sign.",
+      inputSchema: z.object({
+        rebalancing_address: z.string().describe("Rebalancing contract address from get_velvet_portfolios"),
+        action: z.enum(["enable", "disable"]).describe("Whether to enable or disable the tokens as collateral"),
+        tokens: z.array(z.string()).describe("Token addresses to enable or disable as collateral"),
+        controller: z.string().describe("Lending protocol controller address"),
+      }),
+      execute: async ({ rebalancing_address, action, tokens, controller }) => {
+        try {
+          const { encodeCollateralTokensCall } = await import("@/lib/velvet");
+          const tx = encodeCollateralTokensCall(rebalancing_address, action, tokens, controller);
+          return { pendingCollateralUpdate: true, action, tokens, tx };
+        } catch (err: any) {
+          return { error: err?.message ?? "Failed to encode collateral update" };
+        }
+      },
+    }),
+
+    velvet_borrow: tool({
+      description:
+        "Borrow a token from a lending pool against collateral held in a Velvet portfolio vault (asset managers only). Enable collateral tokens first via manage_velvet_collateral. Returns encoded tx data to sign.",
+      inputSchema: z.object({
+        rebalancing_address: z.string().describe("Rebalancing contract address from get_velvet_portfolios"),
+        pool: z.string().describe("Lending pool contract address"),
+        tokens: z.array(z.string()).describe("Collateral token addresses pledged for the borrow"),
+        token_to_borrow: z.string().describe("Address of the token to borrow"),
+        controller: z.string().describe("Lending protocol controller address"),
+        amount_wei: z.string().describe("Amount to borrow in the token's smallest unit"),
+      }),
+      execute: async ({ rebalancing_address, pool, tokens, token_to_borrow, controller, amount_wei }) => {
+        try {
+          const { encodeBorrowCall } = await import("@/lib/velvet");
+          const tx = encodeBorrowCall(rebalancing_address, pool, tokens, token_to_borrow, controller, BigInt(amount_wei));
+          return { pendingBorrow: true, token_to_borrow, amount_wei, tx };
+        } catch (err: any) {
+          return { error: err?.message ?? "Failed to encode borrow" };
+        }
+      },
+    }),
+
+    // ── Flash Trade — Read-only queries ──────────────────────────────────────
+
+    flash_get_tokens: tool({
+      description: "List all tokens available on Flash Trade for swapping and liquidity operations (e.g. SOL, USDC, BTC, ETH, JitoSOL). Call this when the user asks what they can swap or deposit.",
+      inputSchema: z.object({}),
+      execute: async () => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/tokens`);
+          if (!r.ok) return { error: await r.text() };
+          return await r.json();
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    // ── Flash Trade — Quotes (read-only) ─────────────────────────────────────
+
+    flash_get_open_quote: tool({
+      description: "Get a price quote for opening a Flash Trade position — returns estimated entry price, fee, and size. Call this before flash_open_position so the user can see the cost.",
+      inputSchema: z.object({
+        market: z.string().describe("Market symbol, e.g. 'SOL', 'BTC'"),
+        side: z.enum(["long", "short"]),
+        collateralUsd: z.number().positive().describe("Collateral in USD"),
+        leverage: z.number().min(1).max(100),
+      }),
+      execute: async ({ market, side, collateralUsd, leverage }) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const { getMarketsInfo } = await import("@/lib/flash");
+          const markets = getMarketsInfo();
+          const m = markets.find(mk => mk.symbol.toUpperCase() === market.toUpperCase() && mk.side === side);
+          if (!m) return { error: `Market ${market} ${side} not found` };
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/quote?marketId=${m.marketId}&collateral=${collateralUsd}&leverage=${leverage}`);
+          if (!r.ok) return { error: await r.text() };
+          return await r.json();
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_get_close_quote: tool({
+      description: "Get a price quote for closing a Flash Trade position — returns estimated exit price, fees, PnL, and how much the user will receive. Call before flash_close_position to show the user what they'll get.",
+      inputSchema: z.object({
+        marketId: z.number().int().describe("Market ID from flash_get_positions"),
+        sizeDeltaUsd: z.number().positive().optional().describe("USD size to close — omit for full close quote"),
+      }),
+      execute: async ({ marketId, sizeDeltaUsd }) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const params = new URLSearchParams({ wallet: solanaAddress, marketId: String(marketId) });
+          if (sizeDeltaUsd != null) params.set("sizeDeltaUsd", String(sizeDeltaUsd));
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/close-quote?${params}`);
+          if (!r.ok) return { error: await r.text() };
+          return await r.json();
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_get_collateral_quote: tool({
+      description: "Get a quote for adding or removing collateral on an open Flash Trade position — returns new leverage and new liquidation price. Call before flash_add_collateral or flash_remove_collateral.",
+      inputSchema: z.object({
+        marketId: z.number().int().describe("Market ID from flash_get_positions"),
+        direction: z.enum(["add", "remove"]).describe("Whether the user is adding or removing collateral"),
+        collateralUsd: z.number().positive().describe("Amount of collateral in USD"),
+      }),
+      execute: async ({ marketId, direction, collateralUsd }) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const params = new URLSearchParams({ wallet: solanaAddress, marketId: String(marketId), direction, collateralUsd: String(collateralUsd) });
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/collateral-quote?${params}`);
+          if (!r.ok) return { error: await r.text() };
+          return await r.json();
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_get_swap_quote: tool({
+      description: "Get a price quote for swapping tokens on Flash — returns estimated output amount and fee. Call before flash_swap to show the user what they'll receive.",
+      inputSchema: z.object({
+        inSymbol: z.string().describe("Token to sell, e.g. 'SOL'"),
+        outSymbol: z.string().describe("Token to buy, e.g. 'USDC'"),
+        amountIn: z.number().positive().describe("Amount of inSymbol to sell"),
+      }),
+      execute: async ({ inSymbol, outSymbol, amountIn }) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/swap-quote?inSymbol=${inSymbol}&outSymbol=${outSymbol}&amountIn=${amountIn}`);
+          if (!r.ok) return { error: await r.text() };
+          return await r.json();
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_get_liquidity_quote: tool({
+      description: "Get a quote for Flash liquidity operations — how much FLP/sFLP you'll receive when adding, or how much token you'll get when removing. Call before flash_add_liquidity, flash_remove_liquidity, flash_add_compounding, or flash_remove_compounding.",
+      inputSchema: z.object({
+        action: z.enum(["add", "remove", "sflp-add", "sflp-remove"]).describe("'add'=add FLP, 'remove'=remove FLP, 'sflp-add'=add sFLP, 'sflp-remove'=remove sFLP"),
+        symbol: z.string().describe("Token symbol — for add: the token you deposit (e.g. 'USDC'); for remove: the token you want back (e.g. 'USDC')"),
+        amount: z.number().positive().describe("For add: amount of token to deposit; for remove: amount of FLP/sFLP tokens to burn"),
+      }),
+      execute: async ({ action, symbol, amount }) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/liquidity-quote?action=${action}&symbol=${symbol}&amount=${amount}`);
+          if (!r.ok) return { error: await r.text() };
+          return await r.json();
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    // ── Flash Trade — Perpetuals ──────────────────────────────────────────────
+
+    flash_get_markets: tool({
+      description: "List all Flash Trade perpetual markets with current prices, funding rates and available leverage. Call this before opening a position or when the user asks about tradeable assets.",
+      inputSchema: z.object({}),
+      execute: async () => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/markets`);
+          if (!r.ok) return { error: await r.text() };
+          return await r.json();
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_get_positions: tool({
+      description: "Get the user's open Flash Trade positions and pending orders on Solana. Returns marketId, side, size, collateral, entry price, and current PnL for each position.",
+      inputSchema: z.object({}),
+      execute: async () => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/positions?ownerAddress=${solanaAddress}`);
+          if (!r.ok) return { error: await r.text() };
+          return await r.json();
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_get_position_stats: tool({
+      description: "Get real-time PnL and liquidation price for a specific open Flash Trade position. Call after flash_get_positions to get the marketId.",
+      inputSchema: z.object({
+        marketId: z.number().int().describe("Market ID from flash_get_positions"),
+      }),
+      execute: async ({ marketId }) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(
+            `${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/position-stats?wallet=${solanaAddress}&marketId=${marketId}`
+          );
+          if (!r.ok) return { error: await r.text() };
+          return await r.json();
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_deposit_to_vault: tool({
+      description: "Deposit tokens into the Flash Trade vault to use as collateral for trading. The vault holds funds ready for positions.",
+      inputSchema: z.object({
+        tokenSymbol: z.string().describe("Token to deposit, e.g. 'USDC', 'SOL'"),
+        amount: z.number().positive().describe("Amount to deposit"),
+      }),
+      execute: async ({ tokenSymbol, amount }) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/deposit-direct`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, tokenSymbol, amount }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "deposit_to_vault", args: { tokenSymbol, amount }, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_withdraw_from_vault: tool({
+      description: "Withdraw tokens from the Flash Trade vault back to the user's wallet.",
+      inputSchema: z.object({
+        tokenSymbol: z.string().describe("Token to withdraw, e.g. 'USDC'"),
+        amount: z.number().positive().describe("Amount to withdraw"),
+      }),
+      execute: async ({ tokenSymbol, amount }) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/withdrawal`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, tokenSymbol, amount }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "withdraw_from_vault", args: { tokenSymbol, amount }, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_open_position: tool({
+      description: "Prepare a leveraged long or short position on Flash Trade. Returns a pending Solana transaction for the user to sign — NEVER call without explicit confirmation of market, side, collateral and leverage. To add TP/SL, call flash_place_trigger_order after the position is confirmed open.",
+      inputSchema: z.object({
+        market: z.string().describe("Market symbol, e.g. 'SOL', 'BTC', 'ETH'"),
+        side: z.enum(["long", "short"]).describe("Direction of the trade"),
+        collateralSymbol: z.string().default("USDC").describe("Token used as collateral, usually 'USDC'"),
+        collateralUsd: z.number().positive().describe("Collateral amount in USD"),
+        leverage: z.number().min(1).max(100).describe("Leverage multiplier (1–100)"),
+      }),
+      execute: async (args) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/build-open`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, ...args }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "open_position", args, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_close_position: tool({
+      description: "Close or partially close an open Flash Trade position. Use flash_get_positions first to get the marketId.",
+      inputSchema: z.object({
+        marketId: z.number().int().describe("Market ID from flash_get_positions"),
+        closePercent: z.number().min(1).max(100).default(100).describe("Percentage to close (100 = full close)"),
+        collateralSymbol: z.string().default("USDC").describe("Collateral token symbol"),
+      }),
+      execute: async ({ marketId, closePercent, collateralSymbol }) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const endpoint = closePercent < 100 ? "/api/flash/build-partial-close" : "/api/flash/build-close";
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}${endpoint}`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, marketId, closePercent, collateralSymbol }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "close_position", args: { marketId, closePercent }, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_place_limit_order: tool({
+      description: "Place a limit entry order on Flash Trade at a specific price.",
+      inputSchema: z.object({
+        market: z.string().describe("Market symbol, e.g. 'SOL'"),
+        side: z.enum(["long", "short"]),
+        collateralSymbol: z.string().default("USDC"),
+        collateralUsd: z.number().positive(),
+        leverage: z.number().min(1).max(100),
+        limitPrice: z.number().positive().describe("Entry price trigger in USD"),
+      }),
+      execute: async (args) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/build-limit-order`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, ...args }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "limit_order", args, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_place_trigger_order: tool({
+      description: "Set a stop-loss or take-profit trigger on an open Flash Trade position.",
+      inputSchema: z.object({
+        marketId: z.number().int(),
+        isStopLoss: z.boolean().describe("true = stop-loss, false = take-profit"),
+        triggerPrice: z.number().positive().describe("Trigger price in USD"),
+        deltaSizeUsd: z.number().positive().describe("Position size reduction in USD when triggered"),
+        collateralSymbol: z.string().default("USDC"),
+      }),
+      execute: async (args) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/build-trigger-order`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, ...args }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "trigger_order", args, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_cancel_order: tool({
+      description: "Cancel a pending Flash Trade limit or trigger order. For trigger orders, isStopLoss must match the order being cancelled — get it from flash_get_positions.",
+      inputSchema: z.object({
+        marketId: z.number().int(),
+        orderId: z.number().int(),
+        orderType: z.enum(["limit", "trigger"]),
+        isStopLoss: z.boolean().optional().describe("Required when orderType='trigger': true for stop-loss, false for take-profit"),
+      }),
+      execute: async (args) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/cancel-order`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, ...args }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "cancel_order", args, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_add_collateral: tool({
+      description: "Add collateral to an open Flash Trade position to reduce liquidation risk.",
+      inputSchema: z.object({
+        marketId: z.number().int(),
+        collateralSymbol: z.string().default("USDC"),
+        amountUsd: z.number().positive().describe("Amount of collateral to add in USD"),
+      }),
+      execute: async (args) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/build-add-collateral`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, ...args }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "add_collateral", args, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_remove_collateral: tool({
+      description: "Remove collateral from an open Flash Trade position.",
+      inputSchema: z.object({
+        marketId: z.number().int(),
+        collateralSymbol: z.string().default("USDC"),
+        amountUsd: z.number().positive().describe("Amount of collateral to remove in USD"),
+      }),
+      execute: async (args) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/build-remove-collateral`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, ...args }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "remove_collateral", args, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    // ── Flash Swap & Earn ─────────────────────────────────────────────────────
+
+    flash_swap: tool({
+      description: "Swap one token for another using Flash Trade's AMM on Solana. Call this when the user says 'swap X SOL for USDC' or similar.",
+      inputSchema: z.object({
+        inSymbol: z.string().describe("Token to sell, e.g. 'SOL'"),
+        outSymbol: z.string().describe("Token to buy, e.g. 'USDC'"),
+        amountIn: z.number().positive().describe("Amount of inSymbol to sell"),
+      }),
+      execute: async (args) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/build-swap`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, ...args }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "swap", args, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_add_liquidity: tool({
+      description: "Add liquidity to Flash's FLP pool to earn trading fees. The user deposits a token and receives FLP tokens.",
+      inputSchema: z.object({
+        inSymbol: z.string().describe("Token to deposit, e.g. 'USDC', 'SOL'"),
+        amountIn: z.number().positive(),
+      }),
+      execute: async (args) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/build-add-liquidity`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, ...args }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "add_liquidity", args, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_remove_liquidity: tool({
+      description: "Remove FLP liquidity from Flash pool. The user burns FLP tokens and receives a chosen token back.",
+      inputSchema: z.object({
+        outSymbol: z.string().describe("Token to receive back, e.g. 'USDC'"),
+        lpAmountIn: z.number().positive().describe("Amount of FLP tokens to burn"),
+      }),
+      execute: async (args) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/build-remove-liquidity`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, ...args }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "remove_liquidity", args, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_add_compounding: tool({
+      description: "Add sFLP (auto-compounding) liquidity to Flash pool. Rewards are automatically reinvested.",
+      inputSchema: z.object({
+        inSymbol: z.string().describe("Token to deposit"),
+        amountIn: z.number().positive(),
+      }),
+      execute: async (args) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/build-add-compounding`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, ...args }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "add_compounding", args, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_remove_compounding: tool({
+      description: "Remove sFLP (auto-compounding) liquidity from Flash pool.",
+      inputSchema: z.object({
+        outSymbol: z.string().describe("Token to receive back"),
+        sflpAmountIn: z.number().positive().describe("Amount of sFLP tokens to burn"),
+      }),
+      execute: async (args) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/build-remove-compounding`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, ...args }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "remove_compounding", args, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_stake_flash: tool({
+      description: "Stake FLASH tokens to earn protocol rewards.",
+      inputSchema: z.object({ amount: z.number().positive().describe("Amount of FLASH tokens to stake") }),
+      execute: async ({ amount }) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/build-stake`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, amount }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "stake_flash", args: { amount }, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_unstake_flash: tool({
+      description: "Request to unstake FLASH tokens (starts a cooldown period on-chain).",
+      inputSchema: z.object({ amount: z.number().positive().describe("Amount of FLASH tokens to unstake") }),
+      execute: async ({ amount }) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/build-unstake`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, amount }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "unstake_flash", args: { amount }, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_cancel_unstake: tool({
+      description: "Cancel a pending FLASH unstake request by its request ID.",
+      inputSchema: z.object({ withdrawRequestId: z.number().int().min(0) }),
+      execute: async ({ withdrawRequestId }) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/cancel-unstake`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, withdrawRequestId }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "cancel_unstake", args: { withdrawRequestId }, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_withdraw_flash: tool({
+      description: "Withdraw FLASH tokens after the unstake cooldown has completed. Requires the withdraw request ID.",
+      inputSchema: z.object({ withdrawRequestId: z.number().int().min(0) }),
+      execute: async ({ withdrawRequestId }) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/withdraw-flash`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, withdrawRequestId }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "withdraw_flash", args: { withdrawRequestId }, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_collect_stake_reward: tool({
+      description: "Collect accumulated FLASH token staking rewards.",
+      inputSchema: z.object({}),
+      execute: async () => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/collect-stake-reward`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "collect_stake_reward", args: {}, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_collect_flp_reward: tool({
+      description: "Collect FLP liquidity staking rewards (paid in USDC).",
+      inputSchema: z.object({}),
+      execute: async () => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/collect-flp-reward`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "collect_flp_reward", args: {}, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_collect_rebate: tool({
+      description: "Collect accumulated Flash Trade trading fee rebates (paid in USDC).",
+      inputSchema: z.object({}),
+      execute: async () => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/collect-rebate`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "collect_rebate", args: {}, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_cancel_all_triggers: tool({
+      description: "Cancel ALL stop-loss and take-profit trigger orders for a specific market at once.",
+      inputSchema: z.object({
+        marketId: z.number().int().describe("Market ID from flash_get_positions"),
+      }),
+      execute: async ({ marketId }) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/cancel-all-triggers`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, marketId }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "cancel_all_triggers", args: { marketId }, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_migrate_to_sflp: tool({
+      description: "Convert staked FLP tokens into sFLP (auto-compounding). Rewards then compound automatically instead of needing manual claims.",
+      inputSchema: z.object({
+        flpAmount: z.number().positive().describe("Amount of FLP tokens to convert to sFLP"),
+      }),
+      execute: async ({ flpAmount }) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/migrate-stake`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, flpAmount }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "migrate_to_sflp", args: { flpAmount }, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_migrate_to_flp: tool({
+      description: "Convert sFLP (auto-compounding) back into staked FLP. Rewards must then be claimed manually.",
+      inputSchema: z.object({
+        sflpAmount: z.number().positive().describe("Amount of sFLP tokens to convert back to staked FLP"),
+      }),
+      execute: async ({ sflpAmount }) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/migrate-flp`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, sflpAmount }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "migrate_to_flp", args: { sflpAmount }, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_collect_revenue: tool({
+      description: "Collect referral program revenue share from Flash Trade (for users who have referred active traders).",
+      inputSchema: z.object({
+        revenueTokenSymbol: z.string().default("USDC").describe("Token to receive revenue in, usually USDC"),
+      }),
+      execute: async ({ revenueTokenSymbol }) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/collect-revenue`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, revenueTokenSymbol }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "collect_revenue", args: { revenueTokenSymbol }, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_increase_position: tool({
+      description: "Increase the size of an existing open Flash Trade position by adding more collateral and increasing leverage. Use when the user says 'add to my position', 'increase my long', or 'scale into my trade'. Call flash_get_positions first to get the marketId.",
+      inputSchema: z.object({
+        marketId: z.number().int().describe("Market ID from flash_get_positions"),
+        addCollateralUsd: z.number().positive().describe("Additional collateral to add in USD"),
+        sizeDeltaUsd: z.number().positive().describe("Position size increase in USD notional"),
+        slippageBps: z.number().int().min(1).max(500).default(100).describe("Slippage tolerance in basis points (100 = 1%)"),
+      }),
+      execute: async (args) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/build-increase-position`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, ...args }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "increase_position", args, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_edit_limit_order: tool({
+      description: "Edit an existing Flash Trade limit order — change the entry price, size, take-profit, or stop-loss. Use flash_get_positions first to get the marketId and orderId.",
+      inputSchema: z.object({
+        marketId: z.number().int(),
+        orderId: z.number().int(),
+        newLimitPrice: z.number().positive().describe("New entry limit price in USD"),
+        newSizeUsd: z.number().positive().describe("New position size in USD notional"),
+        newTakeProfitPrice: z.number().positive().optional().describe("New take-profit price in USD"),
+        newStopLossPrice: z.number().positive().optional().describe("New stop-loss price in USD"),
+      }),
+      execute: async (args) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/edit-order`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, orderType: "limit", ...args }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "edit_limit_order", args, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_edit_trigger_order: tool({
+      description: "Edit an existing Flash Trade stop-loss or take-profit trigger order — change the trigger price or size. Use flash_get_positions first to get the marketId and orderId.",
+      inputSchema: z.object({
+        marketId: z.number().int(),
+        orderId: z.number().int(),
+        isStopLoss: z.boolean().describe("true = stop-loss, false = take-profit"),
+        newTriggerPrice: z.number().positive().describe("New trigger price in USD"),
+        newDeltaSizeUsd: z.number().positive().describe("New size reduction in USD when triggered"),
+      }),
+      execute: async (args) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/edit-order`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, orderType: "trigger", ...args }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "edit_trigger_order", args, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
+      },
+    }),
+
+    flash_create_session: tool({
+      description: "Create a Flash Trade trading session so the user can trade without signing every transaction. The session lasts up to 24 hours. After approval, Bottie can execute trades automatically on their behalf. Always confirm before creating.",
+      inputSchema: z.object({
+        durationHours: z.number().min(0.5).max(24).default(8).describe("Session duration in hours (max 24)"),
+      }),
+      // The session keypair must be generated client-side (FlashSessionApprovalCard) so the private key
+      // never touches the server. We just return the pending marker here; the card handles the API call.
+      execute: async ({ durationHours }) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        return { pendingFlashSession: true, action: "create_session", args: { durationHours }, solanaAddress };
+      },
+    }),
+
+    flash_revoke_session: tool({
+      description: "Revoke the active Flash Trade trading session, stopping automatic trade execution immediately.",
+      inputSchema: z.object({}),
+      // The session keypair pubkey lives in the browser's localStorage — the server cannot access it.
+      // Return a pendingFlashRevoke marker; FlashRevokeSessionCard reads localStorage and handles the full flow client-side.
+      execute: async () => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        return { pendingFlashRevoke: true, solanaAddress };
+      },
+    }),
+
+    flash_create_referral: tool({
+      description: "Link a referrer wallet address for the user on Flash Trade to start earning rebates.",
+      inputSchema: z.object({ referrerAddress: z.string().describe("The referrer's Solana wallet address") }),
+      execute: async ({ referrerAddress }) => {
+        if (!solanaAddress) return { error: "Solana wallet not connected" };
+        try {
+          const r = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/flash/create-referral`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ownerAddress: solanaAddress, referrerAddress }),
+          });
+          if (!r.ok) return { error: await r.text() };
+          const { transaction } = await r.json();
+          return { pendingFlashTx: true, action: "create_referral", args: { referrerAddress }, transaction, solanaAddress };
+        } catch (err: any) { return { error: err?.message ?? "Failed" }; }
       },
     }),
 

@@ -1,17 +1,34 @@
 import { verifyAuth } from "@/lib/auth";
-import { buildPlaceLimitOrderTx } from "@/lib/flash";
+import { buildPlaceLimitOrderTx, getMarketsInfo } from "@/lib/flash";
+
+function resolveMarketId(body: Record<string, unknown>): number {
+  if (body.marketId != null) return Number(body.marketId);
+  if (body.market && body.side) {
+    const markets = getMarketsInfo();
+    const symbol = String(body.market).toUpperCase();
+    const side = String(body.side).toLowerCase();
+    const m = markets.find(mk => mk.symbol.toUpperCase() === symbol && mk.side === side);
+    if (m) return m.marketId;
+  }
+  throw new Error(`Cannot resolve market — pass marketId or market+side`);
+}
 
 export async function POST(req: Request) {
   try { await verifyAuth(); } catch { return new Response("Unauthorized", { status: 401 }); }
-  const body = await req.json() as {
-    ownerAddress: string; marketId: number; limitPrice: number;
-    collateralUsd: number; leverage: number;
-    takeProfitPrice?: number; stopLossPrice?: number;
-  };
-  if (!body.ownerAddress || body.marketId == null || !body.limitPrice || !body.collateralUsd || !body.leverage)
-    return new Response("ownerAddress, marketId, limitPrice, collateralUsd, leverage required", { status: 400 });
+  const body = await req.json() as Record<string, unknown>;
+  if (!body.ownerAddress || !body.limitPrice || !body.collateralUsd || !body.leverage)
+    return new Response("ownerAddress, limitPrice, collateralUsd, leverage required", { status: 400 });
   try {
-    const tx = await buildPlaceLimitOrderTx(body);
+    const marketId = resolveMarketId(body);
+    const tx = await buildPlaceLimitOrderTx({
+      ownerAddress: String(body.ownerAddress),
+      marketId,
+      limitPrice: Number(body.limitPrice),
+      collateralUsd: Number(body.collateralUsd),
+      leverage: Number(body.leverage),
+      takeProfitPrice: body.takeProfitPrice != null ? Number(body.takeProfitPrice) : undefined,
+      stopLossPrice: body.stopLossPrice != null ? Number(body.stopLossPrice) : undefined,
+    });
     return Response.json({ transaction: tx });
   } catch (err) {
     console.error("[flash/build-limit-order]", err);

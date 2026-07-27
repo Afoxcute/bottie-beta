@@ -936,9 +936,16 @@ export function FlashTradeSection() {
           <p className="text-sm font-semibold text-[#F2F0E8]">Flash Trade</p>
           <p className="text-xs text-[#A7A79A]">Perpetuals · Solana mainnet · Up to 100×</p>
         </div>
-        <a href="https://flash.trade" target="_blank" rel="noreferrer"
-          className="rounded-xl bg-white/[0.06] px-3 py-1.5 text-xs font-medium text-[#A7A79A] hover:bg-white/[0.1]">
-          Flash ↗
+        <a
+          href="https://flash.trade"
+          target="_blank"
+          rel="noreferrer"
+          className="flex items-center gap-1.5 rounded-xl border border-[#2A2B27] bg-[#1B1C19] px-3 py-1.5 text-xs font-medium text-[#A7A79A] hover:border-[#3A3B37] hover:text-[#F2F0E8] transition-colors"
+        >
+          Open flash.trade
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M1.5 8.5L8.5 1.5M8.5 1.5H3.5M8.5 1.5V6.5" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
         </a>
       </div>
 

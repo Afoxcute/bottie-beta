@@ -1,4 +1,4 @@
-import { Connection, Keypair, PublicKey, Transaction, SystemProgram } from "@solana/web3.js";
+import { Connection, Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import { AnchorProvider } from "@coral-xyz/anchor";
 import {
   FlashPerpetualsClient,
@@ -17,22 +17,17 @@ import {
   editLimitOrder,
   editTriggerOrder,
   increasePositionSize,
-  buildSwapEr,
-  buildAddLiquidityAndStakeEr,
-  buildRemoveLiquidityEr,
-  buildCollectRebateEr,
-  depositTokenStake,
-  unstakeTokenRequest,
-  collectTokenReward,
-  createReferral,
+  initializeBasket,
+  initializeUserDepositLedger,
+  delegateBasket,
   findBasketAddress,
+  findDelegationSiblings,
   type BasketAccount,
 } from "@flash_trade/flash-sdk-v2";
 import { BN } from "@coral-xyz/anchor";
 import {
   getAssociatedTokenAddress,
   createAssociatedTokenAccountIdempotentInstruction,
-  TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 
 export { Side, BN };
@@ -126,6 +121,42 @@ async function buildTx(owner: PublicKey, ixs: unknown): Promise<string> {
   return Buffer.from(tx.serialize({ requireAllSignatures: false })).toString("base64");
 }
 
+// Returns an initializeBasket ix if the user's basket account doesn't exist yet, else null.
+async function maybeInitBasketIx(client: FlashPerpetualsClient, owner: PublicKey) {
+  const { erProgram } = getAnyClient(client);
+  const connection = new Connection(SOL_RPC, "confirmed");
+  const [basketPda] = findBasketAddress(owner, erProgram.programId);
+  const info = await connection.getAccountInfo(basketPda);
+  if (info) return null;
+  return initializeBasket(erProgram, owner);
+}
+
+// Returns a delegateBasket ix if the basket hasn't been delegated to the ER yet, else null.
+// MagicBlock requires the basket to be delegated before any ER instruction can use it.
+async function maybeDelegateBasketIx(client: FlashPerpetualsClient, owner: PublicKey) {
+  const { erProgram } = getAnyClient(client);
+  const connection = new Connection(SOL_RPC, "confirmed");
+  const [basketPda] = findBasketAddress(owner, erProgram.programId);
+  const { delegationRecord } = findDelegationSiblings(basketPda, erProgram.programId);
+  const info = await connection.getAccountInfo(delegationRecord);
+  if (info) return null; // already delegated
+  return delegateBasket(erProgram, owner);
+}
+
+// Returns an initializeUserDepositLedger ix if the ledger doesn't exist yet, else null.
+async function maybeInitDepositLedgerIx(client: FlashPerpetualsClient, owner: PublicKey) {
+  const { erProgram } = getAnyClient(client);
+  const connection = new Connection(SOL_RPC, "confirmed");
+  // Ledger PDA seed: ["user_deposit_ledger", owner]
+  const [ledgerPda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("user_deposit_ledger"), owner.toBuffer()],
+    erProgram.programId,
+  );
+  const info = await connection.getAccountInfo(ledgerPda);
+  if (info) return null;
+  return initializeUserDepositLedger(erProgram, owner);
+}
+
 // ── Markets ───────────────────────────────────────────────────────────────────
 
 export function getMarketsInfo(): FlashMarket[] {
@@ -182,7 +213,7 @@ export async function getOpenQuote(params: {
     return {
       entryPrice: q.entryPrice ? Number(q.entryPrice) / 1e6 : null,
       sizeAmount: q.sizeAmount ? q.sizeAmount.toString() : null,
-      fee: q.fee ? Number(q.fee) / 10 ** colDec : null,
+      fee: q.totalFeeUsd ? Number(q.totalFeeUsd) / 1e6 : null,
       collateral: params.collateralUsd,
       leverage: params.leverage,
       collateralSymbol: collateral?.symbol ?? "USDC",
@@ -220,11 +251,15 @@ export async function getCloseQuote(params: {
       dispensingSymbol: collateral?.symbol ?? "USDC",
       sizeDeltaUsd,
     });
+    const isProfitable = q.isProfitable ?? false;
+    const pnlRaw = isProfitable
+      ? (q.profitUsd ? Number(q.profitUsd) / 1e6 : null)
+      : (q.lossUsd ? -Number(q.lossUsd) / 1e6 : null);
     return {
-      exitPrice: q.exitPrice ? Number(q.exitPrice) / 1e6 : null,
-      fee: q.fee ? Number(q.fee) / 10 ** colDec : null,
-      pnl: q.pnl ? Number(q.pnl) / 10 ** colDec : null,
-      receiveAmount: q.receiveAmount ? Number(q.receiveAmount) / 10 ** colDec : null,
+      exitPrice: q.markPrice ? Number(q.markPrice) / 1e6 : null,
+      fee: q.exitFeeUsd ? Number(q.exitFeeUsd) / 1e6 : null,
+      pnl: pnlRaw,
+      receiveAmount: q.receiveTokenAmount ? Number(q.receiveTokenAmount) / 10 ** colDec : null,
       collateralSymbol: collateral?.symbol ?? "USDC",
     };
   } catch {
@@ -268,21 +303,84 @@ export async function getPositionStats(params: {
 
 // ── Positions & orders ────────────────────────────────────────────────────────
 
+function bnToNum(v: unknown): number {
+  if (v == null) return 0;
+  if (typeof (v as { toNumber?: () => number }).toNumber === "function") return (v as { toNumber: () => number }).toNumber();
+  return Number(v);
+}
+
+function decodeOraclePrice(p: unknown): number | null {
+  if (!p) return null;
+  const op = p as { price?: unknown; exponent?: unknown };
+  if (op.price == null || op.exponent == null) return null;
+  const price = bnToNum(op.price);
+  const exp = bnToNum(op.exponent);
+  return price * Math.pow(10, exp);
+}
+
 export async function getUserPositions(walletAddress: string) {
-  const { client } = getFlashClient();
+  const { client, poolConfig } = getFlashClient();
+  const tokens = buildTokenMap(poolConfig);
+
+  // Map market account pubkey string → pool config array index (= marketId used by all routes)
+  const marketPkToIdx: Record<string, number> = {};
+  (poolConfig.markets as { marketAccount: { toString: () => string } }[]).forEach((m, i) => {
+    marketPkToIdx[m.marketAccount.toString()] = i;
+  });
+
   try {
     const ownerPk = new PublicKey(walletAddress);
     const basket: BasketAccount = await client.erAccounts!.fetchBasket(ownerPk);
-    return {
-      positions: (basket.positions ?? []).filter((p: unknown) => {
-        const pos = p as { sizeAmount?: { toNumber?: () => number } };
-        return (pos?.sizeAmount?.toNumber?.() ?? 0) > 0;
-      }),
-      orders: (basket.orders ?? []).filter((o: unknown) => {
-        const ord = o as { sizeAmount?: { toNumber?: () => number }; isActive?: boolean };
-        return ord?.isActive !== false && (ord?.sizeAmount?.toNumber?.() ?? 0) > 0;
-      }),
-    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const positions = ((basket.positions ?? []) as any[])
+      .filter(p => bnToNum(p?.sizeAmount) > 0)
+      .map(p => {
+        const marketPk = p.market?.toString() ?? "";
+        const marketId = marketPkToIdx[marketPk] ?? -1;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const mCfg = marketId >= 0 ? (poolConfig.markets as any[])[marketId] : null;
+        const target = mCfg ? (tokens[mCfg.targetMint.toString()] ?? tokens[WSOL]) : null;
+        const collateral = mCfg ? tokens[mCfg.collateralMint.toString()] : null;
+        const side = mCfg ? (Object.keys(mCfg.side)[0] as string) : "unknown";
+        return {
+          marketId,
+          marketAccount: marketPk,
+          symbol: target?.symbol ?? "?",
+          side,
+          collateralSymbol: collateral?.symbol ?? "USDC",
+          entryPriceUsd: decodeOraclePrice(p.entryPrice),
+          sizeUsd: bnToNum(p.sizeUsd) / 1e6,
+          collateralUsd: bnToNum(p.collateralUsd) / 1e6,
+          isActive: p.isActive ?? true,
+        };
+      });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const orders = ((basket.orders ?? []) as any[])
+      .filter(o => o?.isActive !== false && bnToNum(o?.sizeAmount) > 0)
+      .map(o => {
+        const marketPk = o.market?.toString() ?? "";
+        const marketId = marketPkToIdx[marketPk] ?? -1;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const mCfg = marketId >= 0 ? (poolConfig.markets as any[])[marketId] : null;
+        const target = mCfg ? (tokens[mCfg.targetMint.toString()] ?? tokens[WSOL]) : null;
+        const side = mCfg ? (Object.keys(mCfg.side)[0] as string) : "unknown";
+        return {
+          marketId,
+          marketAccount: marketPk,
+          orderId: o.orderId ?? null,
+          symbol: target?.symbol ?? "?",
+          side,
+          isStopLoss: o.isStopLoss ?? null,
+          limitPrice: decodeOraclePrice(o.limitPrice),
+          triggerPrice: decodeOraclePrice(o.triggerPrice),
+          sizeUsd: bnToNum(o.sizeUsd) / 1e6,
+          isActive: o.isActive ?? true,
+        };
+      });
+
+    return { positions, orders };
   } catch {
     return { positions: [], orders: [] };
   }
@@ -320,15 +418,20 @@ export async function buildOpenPositionTx(params: {
   const priceWithSlippage = new BN(Math.floor(rawPrice * (sideIsLong ? 1 + slippage : 1 - slippage)));
   const owner = new PublicKey(params.ownerAddress);
   const { erProgram, oracleOf } = getAnyClient(client);
-  const ix = await openPosition(
-    erProgram, owner, poolConfig.poolAddress,
-    market.marketAccount, market.targetCustody, market.collateralCustody, market.collateralCustody,
-    await oracleOf(market.targetCustody), await oracleOf(market.collateralCustody), await oracleOf(market.collateralCustody),
-    priceWithSlippage, amountIn,
-    q.sizeAmount ?? amountIn.mul(leverageBps).div(new BN(10000)),
-    undefined, owner, undefined,
-  );
-  return buildTx(owner, ix);
+  const [initIx, delegateIx, ix] = await Promise.all([
+    maybeInitBasketIx(client, owner),
+    maybeDelegateBasketIx(client, owner),
+    openPosition(
+      erProgram, owner, poolConfig.poolAddress,
+      market.marketAccount, market.targetCustody, market.collateralCustody, market.collateralCustody,
+      await oracleOf(market.targetCustody), await oracleOf(market.collateralCustody), await oracleOf(market.collateralCustody),
+      priceWithSlippage, amountIn,
+      q.sizeAmount ?? amountIn.mul(leverageBps).div(new BN(10000)),
+      undefined, owner, undefined,
+    ),
+  ]);
+  const setupIxs = [initIx, delegateIx].filter(Boolean);
+  return buildTx(owner, setupIxs.length > 0 ? [...setupIxs, ix] : ix);
 }
 
 // ── Build: full close position ────────────────────────────────────────────────
@@ -587,12 +690,13 @@ export async function getAddCollateralQuote(params: {
       owner, market: market.marketAccount,
       targetSymbol: target?.symbol ?? "SOL",
       collateralSymbol: collateral?.symbol ?? "USDC",
-      collateralDelta,
+      receivingSymbol: collateral?.symbol ?? "USDC",
+      amountIn: collateralDelta,
     });
     return {
       newLeverage: q.newLeverage ? Number(q.newLeverage) / 10000 : null,
       newLiqPrice: q.newLiquidationPrice ? Number(q.newLiquidationPrice) / 1e6 : null,
-      fee: q.fee ? Number(q.fee) / 10 ** colDec : null,
+      fee: null,
       collateralSymbol: collateral?.symbol ?? "USDC",
     };
   } catch {
@@ -620,13 +724,14 @@ export async function getRemoveCollateralQuote(params: {
       owner, market: market.marketAccount,
       targetSymbol: target?.symbol ?? "SOL",
       collateralSymbol: collateral?.symbol ?? "USDC",
+      dispensingSymbol: collateral?.symbol ?? "USDC",
       collateralDeltaUsd,
     });
     return {
       newLeverage: q.newLeverage ? Number(q.newLeverage) / 10000 : null,
       newLiqPrice: q.newLiquidationPrice ? Number(q.newLiquidationPrice) / 1e6 : null,
-      receiveAmount: q.receiveAmount ? Number(q.receiveAmount) / 10 ** colDec : null,
-      fee: q.fee ? Number(q.fee) / 10 ** colDec : null,
+      receiveAmount: q.receiveTokenAmount ? Number(q.receiveTokenAmount) / 10 ** colDec : null,
+      fee: null,
       collateralSymbol: collateral?.symbol ?? "USDC",
     };
   } catch {

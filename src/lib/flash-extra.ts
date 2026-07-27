@@ -5,6 +5,11 @@ import { Connection, PublicKey, Transaction } from "@solana/web3.js";
 import {
   PoolConfig,
   PROGRAM_ID,
+  PERPETUALS_PROGRAM_ID,
+  SESSION_KEYS_PROGRAM_ID,
+  initializeUserDepositLedger,
+  createSession,
+  revokeSession,
   buildSwapWithAction,
   buildAddLiquidityAndStakeWithAction,
   buildRemoveLiquidityWithAction,
@@ -17,6 +22,10 @@ import {
   buildCollectRebateWithAction,
   buildAddCompoundingLiquidityWithAction,
   buildRemoveCompoundingLiquidityWithAction,
+  buildMigrateFlpWithAction,
+  buildMigrateStakeWithAction,
+  buildCollectRevenueWithAction,
+  cancelAllTriggerOrders,
   depositDirect,
   withdrawalWithAction,
   createReferral,
@@ -81,6 +90,19 @@ async function finalizeTx(owner: PublicKey, ixs: import("@solana/web3.js").Trans
 
 function extractIxs(result: { instructions: import("@solana/web3.js").TransactionInstruction[] }) {
   return result.instructions;
+}
+
+async function maybeInitDepositLedgerIx(client: FlashPerpetualsClient, owner: PublicKey) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const program = getProgram(client);
+  const connection = new Connection(SOL_RPC, "confirmed");
+  const [ledgerPda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("user_deposit_ledger"), owner.toBuffer()],
+    program.programId,
+  );
+  const info = await connection.getAccountInfo(ledgerPda);
+  if (info) return null;
+  return initializeUserDepositLedger(program, owner);
 }
 
 // ── Token list ────────────────────────────────────────────────────────────────
@@ -155,7 +177,7 @@ export async function getAddLiquidityQuote(params: { inSymbol: string; amountIn:
       views.getLpTokenPrice(poolConfig),
     ]);
     return {
-      lpAmount: q.status === "fulfilled" && q.value?.lpAmountOut ? Number(q.value.lpAmountOut) / 1e9 : null,
+      lpAmount: q.status === "fulfilled" && q.value?.amount ? Number(q.value.amount) / 1e9 : null,
       fee: q.status === "fulfilled" && q.value?.fee ? Number(q.value.fee) / 10 ** inTok.decimals : null,
       lpPrice: lpPrice.status === "fulfilled" && lpPrice.value ? Number(lpPrice.value) / 1e6 : null,
       symbol: params.inSymbol,
@@ -173,7 +195,7 @@ export async function getRemoveLiquidityQuote(params: { outSymbol: string; lpAmo
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const q = await (client.views as any).getRemoveLiquidityAmountAndFee(poolConfig, { symbol: params.outSymbol, lpAmountIn: lpAmountBn });
     return {
-      amountOut: q.amountOut ? Number(q.amountOut) / 10 ** outTok.decimals : null,
+      amountOut: q.amount ? Number(q.amount) / 10 ** outTok.decimals : null,
       fee: q.fee ? Number(q.fee) / 10 ** outTok.decimals : null,
       symbol: params.outSymbol,
     };
@@ -345,7 +367,7 @@ export async function getAddCompoundingQuote(params: { inSymbol: string; amountI
       views.getCompoundingTokenPrice(poolConfig),
     ]);
     return {
-      sflpAmount: q.status === "fulfilled" && q.value?.compoundingAmountOut ? Number(q.value.compoundingAmountOut) / 1e9 : null,
+      sflpAmount: q.status === "fulfilled" && q.value?.amount ? Number(q.value.amount) / 1e9 : null,
       fee: q.status === "fulfilled" && q.value?.fee ? Number(q.value.fee) / 10 ** inTok.decimals : null,
       sflpPrice: price.status === "fulfilled" && price.value ? Number(price.value) / 1e6 : null,
       symbol: params.inSymbol,
@@ -363,7 +385,7 @@ export async function getRemoveCompoundingQuote(params: { outSymbol: string; sfl
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const q = await (client.views as any).getRemoveCompoundingLiquidityAmountAndFee(poolConfig, { outSymbol: params.outSymbol, compoundingAmountIn });
     return {
-      amountOut: q.amountOut ? Number(q.amountOut) / 10 ** outTok.decimals : null,
+      amountOut: q.amount ? Number(q.amount) / 10 ** outTok.decimals : null,
       fee: q.fee ? Number(q.fee) / 10 ** outTok.decimals : null,
       symbol: params.outSymbol,
     };
@@ -380,8 +402,11 @@ export async function buildDepositDirectTx(params: { ownerAddress: string; token
   if (!tok) throw new Error("Token not found");
   const amount = new BN(Math.floor(params.amount * 10 ** tok.decimals));
   const { ata: depositorAta, createIx } = await getAta(owner, tok.mintKey as PublicKey);
-  const ix = await depositDirect(getProgram(client), owner, tok.mintKey as PublicKey, depositorAta, amount);
-  return finalizeTx(owner, [createIx, ix]);
+  const [ledgerIx, ix] = await Promise.all([
+    maybeInitDepositLedgerIx(client, owner),
+    depositDirect(getProgram(client), owner, tok.mintKey as PublicKey, depositorAta, amount),
+  ]);
+  return finalizeTx(owner, [createIx, ...(ledgerIx ? [ledgerIx] : []), ix]);
 }
 
 export async function buildWithdrawalTx(params: { ownerAddress: string; tokenSymbol: string; amount: number }): Promise<string> {
@@ -403,5 +428,103 @@ export async function buildCreateReferralTx(params: { ownerAddress: string; refe
   const owner = new PublicKey(params.ownerAddress);
   const referrer = new PublicKey(params.referrerAddress);
   const ix = await createReferral(getProgram(client), referrer, { owner });
+  return finalizeTx(owner, [ix]);
+}
+
+// ── Collect Revenue (referrer protocol revenue) ───────────────────────────────
+
+export async function buildCollectRevenueTx(params: { ownerAddress: string; revenueTokenSymbol?: string }): Promise<string> {
+  const { client, poolConfig } = getClient();
+  const owner = new PublicKey(params.ownerAddress);
+  const program = getProgram(client);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tokens = poolConfig.tokens as any[];
+  const symbol = params.revenueTokenSymbol ?? "USDC";
+  const tok = tokens.find(t => t.symbol === symbol);
+  if (!tok) throw new Error(`Token ${symbol} not found`);
+  const { ata: receivingAta, createIx } = await getAta(owner, tok.mintKey as PublicKey);
+  const result = await buildCollectRevenueWithAction(program, {
+    revenueTokenMint: tok.mintKey as PublicKey,
+    receivingRevenueAccount: receivingAta,
+    owner,
+  });
+  return finalizeTx(owner, [createIx, ...extractIxs(result)]);
+}
+
+// ── Migrate FLP ↔ sFLP ────────────────────────────────────────────────────────
+
+export async function buildMigrateFlpTx(params: { ownerAddress: string; sflpAmount: number }): Promise<string> {
+  const { client, poolConfig } = getClient();
+  const owner = new PublicKey(params.ownerAddress);
+  const program = getProgram(client);
+  const compoundingMint = (poolConfig as any).compoundingTokenMint as PublicKey;
+  const { ata: compoundingAta, createIx } = await getAta(owner, compoundingMint);
+  const amount = new BN(Math.floor(params.sflpAmount * 1e6));
+  const result = await buildMigrateFlpWithAction(program, poolConfig, {
+    compoundingTokenAccount: compoundingAta,
+    compoundingTokenAmount: amount,
+    owner,
+  });
+  return finalizeTx(owner, [createIx, ...extractIxs(result)]);
+}
+
+export async function buildMigrateStakeTx(params: { ownerAddress: string; flpAmount: number }): Promise<string> {
+  const { client, poolConfig } = getClient();
+  const owner = new PublicKey(params.ownerAddress);
+  const program = getProgram(client);
+  const compoundingMint = (poolConfig as any).compoundingTokenMint as PublicKey;
+  const { ata: compoundingAta, createIx } = await getAta(owner, compoundingMint);
+  const amount = new BN(Math.floor(params.flpAmount * 1e6));
+  const result = await buildMigrateStakeWithAction(program, poolConfig, {
+    compoundingTokenAccount: compoundingAta,
+    amount,
+    owner,
+  });
+  return finalizeTx(owner, [createIx, ...extractIxs(result)]);
+}
+
+// ── Cancel All Triggers ───────────────────────────────────────────────────────
+
+export async function buildCancelAllTriggersTx(params: { ownerAddress: string; marketId: number }): Promise<string> {
+  const { client, poolConfig } = getClient();
+  const owner = new PublicKey(params.ownerAddress);
+  const program = getProgram(client);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const markets = (poolConfig as any).markets as any[];
+  const market = markets.find((_: any, i: number) => i === params.marketId) ?? markets[params.marketId];
+  if (!market) throw new Error(`Market ${params.marketId} not found`);
+  const marketPk = market.marketAccount ?? market.publicKey ?? market;
+  const ix = await cancelAllTriggerOrders(program, owner, marketPk as PublicKey);
+  return finalizeTx(owner, [ix]);
+}
+
+// ── Session Keys ──────────────────────────────────────────────────────────────
+
+/**
+ * Builds a create_session_v2 transaction.
+ * The transaction must be signed by BOTH the owner wallet (Privy) AND the
+ * session keypair. The session keypair is generated client-side and its
+ * public key is passed here. The secret key is stored in the browser.
+ */
+export async function buildCreateSessionTx(params: {
+  ownerAddress: string;
+  sessionSignerPubkey: string;
+  durationHours: number;
+}): Promise<string> {
+  const owner = new PublicKey(params.ownerAddress);
+  const sessionSigner = new PublicKey(params.sessionSignerPubkey);
+  const validUntilMs = Date.now() + params.durationHours * 60 * 60 * 1000;
+  const validUntil = new (await import("@coral-xyz/anchor")).BN(Math.floor(validUntilMs / 1000));
+  const ix = createSession(owner, sessionSigner, PERPETUALS_PROGRAM_ID, false, validUntil);
+  return finalizeTx(owner, [ix]);
+}
+
+export async function buildRevokeSessionTx(params: {
+  ownerAddress: string;
+  sessionSignerPubkey: string;
+}): Promise<string> {
+  const owner = new PublicKey(params.ownerAddress);
+  const sessionSigner = new PublicKey(params.sessionSignerPubkey);
+  const ix = revokeSession(owner, sessionSigner, PERPETUALS_PROGRAM_ID);
   return finalizeTx(owner, [ix]);
 }

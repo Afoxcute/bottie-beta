@@ -370,6 +370,61 @@ export function encodeTreasuryCall(configAddress: string, newTreasury: string): 
   };
 }
 
+export function encodeMinHoldingAmountCall(configAddress: string, minAmountWei: bigint): { to: string; data: string } {
+  return {
+    to: configAddress,
+    data: encodeFunctionData({ abi: ASSET_MGMT_CONFIG_ABI, functionName: "updateMinPortfolioTokenHoldingAmount", args: [minAmountWei] }),
+  };
+}
+
+export function encodeInitialPortfolioAmountCall(configAddress: string, amountWei: bigint): { to: string; data: string } {
+  return {
+    to: configAddress,
+    data: encodeFunctionData({ abi: ASSET_MGMT_CONFIG_ABI, functionName: "updateInitialPortfolioAmount", args: [amountWei] }),
+  };
+}
+
+export function encodeEnableUniswapV3ManagerCall(configAddress: string): { to: string; data: string } {
+  return {
+    to: configAddress,
+    data: encodeFunctionData({ abi: ASSET_MGMT_CONFIG_ABI, functionName: "enableUniSwapV3Manager" }),
+  };
+}
+
+export function encodeCollateralTokensCall(
+  rebalancingAddress: string,
+  action: "enable" | "disable",
+  tokens: string[],
+  controller: string
+): { to: string; data: string } {
+  const tokenAddrs = tokens as `0x${string}`[];
+  const controllerAddr = controller as `0x${string}`;
+  return {
+    to: rebalancingAddress,
+    data: action === "enable"
+      ? encodeFunctionData({ abi: REBALANCING_ABI, functionName: "enableCollateralTokens", args: [tokenAddrs, controllerAddr] })
+      : encodeFunctionData({ abi: REBALANCING_ABI, functionName: "disableCollateralTokens", args: [tokenAddrs, controllerAddr] }),
+  };
+}
+
+export function encodeBorrowCall(
+  rebalancingAddress: string,
+  pool: string,
+  tokens: string[],
+  tokenToBorrow: string,
+  controller: string,
+  amountToBorrow: bigint
+): { to: string; data: string } {
+  return {
+    to: rebalancingAddress,
+    data: encodeFunctionData({
+      abi: REBALANCING_ABI,
+      functionName: "borrow",
+      args: [pool as `0x${string}`, tokens as `0x${string}`[], tokenToBorrow as `0x${string}`, controller as `0x${string}`, amountToBorrow],
+    }),
+  };
+}
+
 export function encodeClaimRemovedTokens(
   tokenExclusionManagerAddress: string,
   userAddress: string,
