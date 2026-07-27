@@ -7,6 +7,8 @@ import { useDemoState, type PortfolioPosition } from "@/contexts/demo-state-cont
 import { PaymentModal } from "./payment-modal";
 import { useChatSheet } from "@/contexts/chat-context";
 import { VelvetTradingSection } from "./velvet-trading-section";
+import { FlashTradeSection } from "./flash-trade-section";
+import { FlashExtrasSection } from "./flash-extras-section";
 
 const TYPE_LABELS: Record<string, string> = {
   stock: "Stock",
@@ -148,6 +150,113 @@ function BuySheet({ asset, onClose, onConfirm }: BuySheetProps) {
   );
 }
 
+// ── Crypto platform list + detail sheet ──────────────────────────────────────
+
+type CryptoPlatform = "flash-trade" | "flash-extras" | "velvet";
+
+const CRYPTO_PLATFORMS = [
+  {
+    id: "flash-trade" as CryptoPlatform,
+    icon: "⚡",
+    name: "Flash Trade",
+    tag: "Perpetuals",
+    description: "Up to 100× leverage on SOL, BTC, ETH and more — Solana mainnet",
+    badge: "Solana",
+    badgeColor: "text-purple-400 bg-purple-400/10",
+  },
+  {
+    id: "flash-extras" as CryptoPlatform,
+    icon: "🔄",
+    name: "Flash Swap & Earn",
+    tag: "DeFi",
+    description: "Swap tokens, provide FLP/sFLP liquidity, stake FLASH, collect rebates",
+    badge: "Solana",
+    badgeColor: "text-purple-400 bg-purple-400/10",
+  },
+  {
+    id: "velvet" as CryptoPlatform,
+    icon: "🏦",
+    name: "Velvet Vaults",
+    tag: "On-chain Vaults",
+    description: "Automated on-chain vaults — deposit, withdraw and rebalance on Base",
+    badge: "Base",
+    badgeColor: "text-blue-400 bg-blue-400/10",
+  },
+];
+
+function CryptoList() {
+  const [open, setOpen] = useState<CryptoPlatform | null>(null);
+
+  return (
+    <>
+      <div className="flex flex-col gap-3">
+        {CRYPTO_PLATFORMS.map((p) => (
+          <button
+            key={p.id}
+            onClick={() => setOpen(p.id)}
+            className="flex items-center gap-4 rounded-2xl border border-[#2A2B27] bg-[#1B1C19] p-4 text-left transition-colors hover:border-[#3A3B37] active:bg-white/[0.04] w-full"
+          >
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-white/[0.06] text-2xl">
+              {p.icon}
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <p className="font-semibold text-[#F2F0E8]">{p.name}</p>
+                <span className="rounded-full bg-white/[0.06] px-2 py-0.5 text-xs text-[#A7A79A]">{p.tag}</span>
+                <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${p.badgeColor}`}>{p.badge}</span>
+              </div>
+              <p className="truncate text-xs text-[#A7A79A] mt-0.5">{p.description}</p>
+            </div>
+            <svg className="shrink-0 text-[#A7A79A]" width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M6 4l4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </button>
+        ))}
+      </div>
+
+      {/* Detail sheet — slides up over the page */}
+      {open && typeof document !== "undefined" && createPortal(
+        <div className="fixed inset-0 z-[70] flex flex-col">
+          {/* Backdrop */}
+          <div className="flex-1 bg-black/60 backdrop-blur-sm" onClick={() => setOpen(null)} />
+          {/* Sheet */}
+          <div className="bg-[#141513] rounded-t-3xl max-h-[90vh] flex flex-col">
+            {/* Handle + header */}
+            <div className="flex items-center justify-between px-5 pt-4 pb-3 border-b border-[#2A2B27] shrink-0">
+              <div className="flex items-center gap-3">
+                <span className="text-xl">
+                  {CRYPTO_PLATFORMS.find(p => p.id === open)?.icon}
+                </span>
+                <div>
+                  <p className="font-semibold text-[#F2F0E8] text-sm">
+                    {CRYPTO_PLATFORMS.find(p => p.id === open)?.name}
+                  </p>
+                  <p className="text-xs text-[#A7A79A]">
+                    {CRYPTO_PLATFORMS.find(p => p.id === open)?.tag}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setOpen(null)}
+                className="flex h-8 w-8 items-center justify-center rounded-full bg-white/[0.06] text-[#A7A79A] hover:text-white transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+            {/* Scrollable content — padded so chat bar doesn't overlap */}
+            <div className="overflow-y-auto flex-1 p-4 pb-[calc(max(env(safe-area-inset-bottom),24px)+72px)]">
+              {open === "flash-trade"  && <FlashTradeSection />}
+              {open === "flash-extras" && <FlashExtrasSection />}
+              {open === "velvet"       && <VelvetTradingSection />}
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+    </>
+  );
+}
+
 export function InvestmentsScreen() {
   const { portfolio, buyAsset } = useDemoState();
   const { open: openChat, sendMessage } = useChatSheet();
@@ -274,7 +383,9 @@ export function InvestmentsScreen() {
             ))}
           </div>
 
-          {marketFilter === "crypto" && <VelvetTradingSection />}
+          {marketFilter === "crypto" && (
+            <CryptoList />
+          )}
 
           {marketFilter !== "crypto" && <div className="flex flex-col gap-3">
             {marketEntries.map((asset) => {
